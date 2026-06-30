@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -117,6 +119,15 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
 
     private var isMuted = false
     private var hasAppliedInitialMute = false
+    // Coalesces the burst of per-prop update() calls React applies each render into a
+    // single recalculation (see update()).
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private var updateScheduled = false
+    @OptIn(com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI::class)
+    private val updateRunnable = Runnable {
+        updateScheduled = false
+        performUpdate()
+    }
     private var currentCoordinates: List<Point>? = null
     private var currentLocale = Locale.getDefault()
     private var currentWaypointIndices: List<Int>? = null
@@ -839,6 +850,9 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        // Drop any update scheduled but not yet run so it can't fire against a torn-down view.
+        mainHandler.removeCallbacks(updateRunnable)
+        updateScheduled = false
         mapboxNavigation?.unregisterRoutesObserver(routesObserver)
         mapboxNavigation?.unregisterRouteProgressObserver(routeProgressObserver)
         mapboxNavigation?.unregisterLocationObserver(locationObserver)
@@ -1087,6 +1101,18 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
 
     @com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
     private fun update() {
+        // React/Expo applies every prop through its own setter, and each setter calls
+        // update(). A single render is therefore ~15 update() calls within one frame, each
+        // rebuilding the speech/style/formatter objects and cancelling + re-issuing the
+        // route request. Coalesce the burst into one recalculation by deferring to the end
+        // of the current frame, by which point every prop in this render has been applied.
+        if (updateScheduled) return
+        updateScheduled = true
+        mainHandler.post(updateRunnable)
+    }
+
+    @com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
+    private fun performUpdate() {
         voiceInstructionsPlayer =
                 MapboxVoiceInstructionsPlayer(context, currentLocale.toLanguageTag())
         voiceInstructionsPlayer.volume(
