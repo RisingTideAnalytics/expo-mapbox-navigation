@@ -109,6 +109,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
     var onMuteChange: EventDispatcher? = nil
 
     var calculateRoutesTask: Task<Void, Error>? = nil
+    // Coalesces the burst of per-prop update() calls React applies each render into one
+    // route request, and tags each request so superseded ones are ignored rather than
+    // cancelled (see update()/calculateRoutes()).
+    private var updateScheduled: Bool = false
+    private var routeRequestGeneration: Int = 0
     private var routeProgressCancellable: AnyCancellable? = nil
     private var waypointArrivalCancellable: AnyCancellable? = nil
     private var reroutingCancellable: AnyCancellable? = nil
@@ -462,13 +467,30 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     func update(){
-        calculateRoutesTask?.cancel()
+        // React/Expo applies every prop through its own setter, and each setter calls
+        // update(). On mount and on every re-render that is ~15 update() calls within a
+        // single runloop tick. Recalculating a route on each one previously cancelled the
+        // in-flight calculateRoutes Task every time; MapboxNavigationCore's
+        // doRequest(options:) does not resume its continuation when its Task is cancelled,
+        // so each cancelled request leaked a continuation ("SWIFT TASK CONTINUATION
+        // MISUSE") and ultimately crashed the app. Coalesce the burst into a single
+        // request by deferring the work to the end of the current runloop tick, by which
+        // point every prop in this render has been applied.
+        if updateScheduled { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.updateScheduled = false
+            self.performUpdate()
+        }
+    }
 
+    private func performUpdate(){
         if(currentCoordinates != nil){
             let waypoints = currentCoordinates!.enumerated().map {
                 let index = $0
                 let coordinate = $1
-                var waypoint = Waypoint(coordinate: coordinate) 
+                var waypoint = Waypoint(coordinate: coordinate)
                 waypoint.separatesLegs = currentWaypointIndices == nil ? true : currentWaypointIndices!.contains(index)
                 return waypoint
             }
@@ -507,8 +529,14 @@ class ExpoMapboxNavigationViewController: UIViewController {
             }
         }
 
+        routeRequestGeneration += 1
+        let generation = routeRequestGeneration
         calculateRoutesTask = Task {
-            switch await self.routingProvider!.calculateRoutes(options: routeOptions).result {
+            // Let the request run to completion (never cancelled) so the SDK resumes its
+            // continuation; if a newer request has started meanwhile, drop this result.
+            let result = await self.routingProvider!.calculateRoutes(options: routeOptions).result
+            guard generation == self.routeRequestGeneration else { return }
+            switch result {
             case .failure(let error):
                 onRouteFailedToLoad?([
                     "errorMessage": error.localizedDescription
@@ -530,8 +558,14 @@ class ExpoMapboxNavigationViewController: UIViewController {
         matchOptions.locale = currentLocale
 
 
+        routeRequestGeneration += 1
+        let generation = routeRequestGeneration
         calculateRoutesTask = Task {
-            switch await self.routingProvider!.calculateRoutes(options: matchOptions).result {
+            // Let the request run to completion (never cancelled) so the SDK resumes its
+            // continuation; if a newer request has started meanwhile, drop this result.
+            let result = await self.routingProvider!.calculateRoutes(options: matchOptions).result
+            guard generation == self.routeRequestGeneration else { return }
+            switch result {
             case .failure(let error):
                 onRouteFailedToLoad?([
                     "errorMessage": error.localizedDescription
