@@ -33,7 +33,7 @@
   "homepage": "https://github.com/uju777/expo-mapbox-navigation#readme",
   "dependencies": {},
   "devDependencies": {
-    "@types/react": "^18.0.25",
+    "@types/react": "^19.0.0",
     "expo-module-scripts": "^3.5.2",
     "expo-modules-core": "~2.5.0",
     "@expo/config-plugins": "~8.0.10"
