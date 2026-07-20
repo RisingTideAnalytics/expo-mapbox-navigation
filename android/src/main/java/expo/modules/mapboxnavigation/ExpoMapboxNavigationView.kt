@@ -401,6 +401,8 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
                     // Handle manuevers
                     val maneuvers = maneuverApi.getManeuvers(routeProgress)
                     maneuverView.renderManeuvers(maneuvers)
+                    // MOB-371: re-enforce wrap/ellipsize after the SDK renders new maneuver text.
+                    applyManeuverTextWrapping(maneuverView)
 
                     // Handle trip progress view
                     tripProgressApi.getTripProgress(routeProgress).let {
@@ -529,6 +531,31 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
                             .build()
 
             updateManeuverViewOptions(maneuverViewOptions)
+
+            // MOB-371: keep long instructions (e.g. "Your destination is on the right") from
+            // running off the right edge. The maneuver container is width-bounded, but the
+            // primary/secondary maneuver TextViews render single-line by default, so a long
+            // instruction clips at the screen edge. Force them to wrap to 2 lines and ellipsize.
+            applyManeuverTextWrapping(this)
+        }
+    }
+
+    /**
+     * MOB-371: recursively force every TextView inside the maneuver view to wrap to at most two
+     * lines and ellipsize the overflow, so long instructions stay on-screen. Applied on creation
+     * and re-applied after each renderManeuvers() because the SDK may reset these properties (or
+     * lazily inflate the secondary/sub maneuver views) when it renders new text.
+     */
+    private fun applyManeuverTextWrapping(view: View) {
+        when (view) {
+            is TextView -> {
+                view.maxLines = 2
+                view.ellipsize = android.text.TextUtils.TruncateAt.END
+            }
+            is ViewGroup ->
+                    for (i in 0 until view.childCount) {
+                        applyManeuverTextWrapping(view.getChildAt(i))
+                    }
         }
     }
 
