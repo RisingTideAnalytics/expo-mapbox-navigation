@@ -28,12 +28,18 @@ class ExpoMapboxNavigationModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("ExpoMapboxNavigation")
 
+    // Point the Maps SDK (every MapView, incl. the navigation view) at the same shared TileStore
+    // that routing + offline downloads use, so display tiles downloaded offline are read by the
+    // visible map instead of a separate default store. This MUST run before any MapView is
+    // constructed — a view can be created during rendering, earlier than OnActivityEntersForeground,
+    // and reassigning this global later does not migrate an already-created MapView. OnCreate runs
+    // at module initialization, before any view is created.
+    OnCreate {
+      MapboxMapsOptions.tileStore = sharedTileStore
+    }
+
     OnActivityEntersForeground {
       (activity as LifecycleOwner).lifecycleScope.launch(Dispatchers.Main) {
-        // Point the Maps SDK (every MapView, incl. the navigation view) at the same shared TileStore
-        // that routing + offline downloads use, so display tiles downloaded offline are actually
-        // read by the visible map instead of a separate default store.
-        MapboxMapsOptions.tileStore = sharedTileStore
         if (!MapboxNavigationApp.isSetup()) {
           MapboxNavigationApp.setup {
             NavigationOptions.Builder(activity.applicationContext)
