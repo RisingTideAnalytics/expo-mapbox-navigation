@@ -2,9 +2,12 @@ package expo.modules.mapboxnavigation
 
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.mapbox.common.TileStore
 import com.mapbox.geojson.Point
 import com.mapbox.navigation.base.options.NavigationOptions
+import com.mapbox.navigation.base.options.RoutingTilesOptions
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +17,12 @@ class ExpoMapboxNavigationModule : Module() {
   private val activity
     get() = requireNotNull(appContext.activityProvider?.currentActivity)
 
+  // A single shared TileStore backs both the Nav SDK's routing tiles (via RoutingTilesOptions
+  // below) and the Maps SDK display tiles / offline downloads, so offline routing and the base map
+  // read from the same on-device store (MOB-383).
+  private val sharedTileStore: TileStore by lazy { TileStore.create() }
+  private val offlineTileManager by lazy { OfflineTileManager(sharedTileStore) }
+
   @com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
   override fun definition() = ModuleDefinition {
     Name("ExpoMapboxNavigation")
@@ -22,11 +31,71 @@ class ExpoMapboxNavigationModule : Module() {
       (activity as LifecycleOwner).lifecycleScope.launch(Dispatchers.Main) {
         if (!MapboxNavigationApp.isSetup()) {
           MapboxNavigationApp.setup {
-            NavigationOptions.Builder(activity.applicationContext).build()
+            NavigationOptions.Builder(activity.applicationContext)
+              .routingTilesOptions(
+                RoutingTilesOptions.Builder().tileStore(sharedTileStore).build()
+              )
+              .build()
           }
         }
         MapboxNavigationApp.attach(activity as LifecycleOwner)
       }
+    }
+
+    // Offline tile pre-download API (MOB-383). Module-level (not view) because downloads run on the
+    // prep screen before any ExpoMapboxNavigationView is mounted.
+    Events("onOfflineProgress", "onOfflineComplete", "onOfflineError")
+
+    AsyncFunction("downloadOfflineRegion") { options: Map<String, Any?>, promise: Promise ->
+      val regionId = options["regionId"] as? String
+      val geometry = options["geometry"] as? Map<*, *>
+      @Suppress("UNCHECKED_CAST")
+      val coordinates = geometry?.get("coordinates") as? List<List<List<Double>>>
+      val styleURL = options["styleURL"] as? String
+      if (regionId == null || coordinates == null || styleURL == null) {
+        promise.reject("ERR_OFFLINE_ARGS", "Missing or invalid offline region options", null)
+        return@AsyncFunction
+      }
+      val minZoom = (options["minZoom"] as? Number)?.toInt() ?: 7
+      val maxZoom = (options["maxZoom"] as? Number)?.toInt() ?: 15
+
+      (activity as LifecycleOwner).lifecycleScope.launch(Dispatchers.Main) {
+        offlineTileManager.downloadRegion(
+          regionId,
+          coordinates,
+          styleURL,
+          minZoom,
+          maxZoom,
+          { rid, stage, completed, required ->
+            sendEvent(
+              "onOfflineProgress",
+              mapOf(
+                "regionId" to rid,
+                "stage" to stage,
+                "completedResourceCount" to completed,
+                "requiredResourceCount" to required
+              )
+            )
+          },
+          { error ->
+            if (error != null) {
+              sendEvent("onOfflineError", mapOf("regionId" to regionId, "message" to error))
+              promise.reject("ERR_OFFLINE_DOWNLOAD", error, null)
+            } else {
+              sendEvent("onOfflineComplete", mapOf("regionId" to regionId))
+              promise.resolve(mapOf("regionId" to regionId))
+            }
+          }
+        )
+      }
+    }
+
+    AsyncFunction("removeOfflineRegion") { regionId: String, styleURL: String?, promise: Promise ->
+      offlineTileManager.removeRegion(regionId, styleURL) { promise.resolve(null) }
+    }
+
+    AsyncFunction("getOfflineRegions") { promise: Promise ->
+      offlineTileManager.listRegions { regions -> promise.resolve(regions) }
     }
 
     View(ExpoMapboxNavigationView::class) {

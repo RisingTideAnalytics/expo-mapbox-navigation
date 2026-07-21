@@ -40,6 +40,59 @@ export type ExpoMapboxNavigationViewRef = {
   recenterMap: () => void;
 };
 
+/**
+ * A GeoJSON geometry (Polygon or MultiPolygon) describing the region to download offline tiles for.
+ * Coordinates are [longitude, latitude] and rings are closed, per the GeoJSON spec.
+ */
+export type OfflineTileGeometry = {
+  type: "Polygon" | "MultiPolygon";
+  coordinates: number[][][] | number[][][][];
+};
+
+/**
+ * Options for pre-downloading a region of Mapbox tiles for offline turn-by-turn navigation.
+ * A single tile region (keyed by `regionId`) carries BOTH the navigation routing tiles and the
+ * map display tiles into one shared TileStore, plus the style pack, so they download and evict
+ * together.
+ */
+export type DownloadOfflineRegionOptions = {
+  /** Caller-supplied id for the region; reused to query/remove it. */
+  regionId: string;
+  /** GeoJSON geometry (typically a padded bounding box) to cover. */
+  geometry: OfflineTileGeometry;
+  /** Style URI whose display tiles + style pack to download (matches the runtime map style). */
+  styleURL: string;
+  /** Most zoomed-out display level to cache. */
+  minZoom: number;
+  /** Most zoomed-in display level to cache. */
+  maxZoom: number;
+  /** Routing profile for the navigation tileset (offline routing supports plain "driving"). */
+  routingProfile?: string;
+};
+
+export type OfflineRegionInfo = {
+  regionId: string;
+  completedResourceCount: number;
+  requiredResourceCount: number;
+};
+
+export type OfflineProgressEvent = {
+  regionId: string;
+  /** Which sub-download this progress refers to. */
+  stage: "routingTiles" | "stylePack" | "displayTiles";
+  completedResourceCount: number;
+  requiredResourceCount: number;
+};
+
+export type OfflineCompleteEvent = {
+  regionId: string;
+};
+
+export type OfflineErrorEvent = {
+  regionId: string;
+  message: string;
+};
+
 export type ExpoMapboxNavigationViewProps = {
   ref?: Ref<ExpoMapboxNavigationViewRef>;
   coordinates: Array<{ latitude: number; longitude: number }>;
