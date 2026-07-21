@@ -4,6 +4,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.lifecycleScope
 import com.mapbox.common.TileStore
 import com.mapbox.geojson.Point
+import com.mapbox.maps.MapboxMapsOptions
 import com.mapbox.navigation.base.options.NavigationOptions
 import com.mapbox.navigation.base.options.RoutingTilesOptions
 import com.mapbox.navigation.core.lifecycle.MapboxNavigationApp
@@ -29,6 +30,10 @@ class ExpoMapboxNavigationModule : Module() {
 
     OnActivityEntersForeground {
       (activity as LifecycleOwner).lifecycleScope.launch(Dispatchers.Main) {
+        // Point the Maps SDK (every MapView, incl. the navigation view) at the same shared TileStore
+        // that routing + offline downloads use, so display tiles downloaded offline are actually
+        // read by the visible map instead of a separate default store.
+        MapboxMapsOptions.tileStore = sharedTileStore
         if (!MapboxNavigationApp.isSetup()) {
           MapboxNavigationApp.setup {
             NavigationOptions.Builder(activity.applicationContext)
@@ -56,8 +61,12 @@ class ExpoMapboxNavigationModule : Module() {
         promise.reject("ERR_OFFLINE_ARGS", "Missing or invalid offline region options", null)
         return@AsyncFunction
       }
-      val minZoom = (options["minZoom"] as? Number)?.toInt() ?: 7
-      val maxZoom = (options["maxZoom"] as? Number)?.toInt() ?: 15
+      // Clamp to a valid tile zoom range and normalize order (a reversed or out-of-range zoom
+      // would produce an invalid descriptor / wrong tiles).
+      val rawMinZoom = ((options["minZoom"] as? Number)?.toInt() ?: 7).coerceIn(0, 22)
+      val rawMaxZoom = ((options["maxZoom"] as? Number)?.toInt() ?: 15).coerceIn(0, 22)
+      val minZoom = minOf(rawMinZoom, rawMaxZoom)
+      val maxZoom = maxOf(rawMinZoom, rawMaxZoom)
 
       (activity as LifecycleOwner).lifecycleScope.launch(Dispatchers.Main) {
         offlineTileManager.downloadRegion(

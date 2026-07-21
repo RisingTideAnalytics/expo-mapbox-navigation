@@ -99,8 +99,16 @@ class OfflineTileManager(private val tileStore: TileStore) {
         progress: ProgressHandler,
         onComplete: (error: String?) -> Unit
     ) {
+        // The routing tileset descriptor requires MapboxNavigationApp to be initialized. If it isn't
+        // (e.g. the download is triggered before nav setup), fail rather than silently downloading
+        // display tiles only — a region without routing tiles can't serve offline directions but
+        // would otherwise report success.
         val navigationDescriptor: TilesetDescriptor? =
             MapboxNavigationApp.current()?.tilesetDescriptorFactory?.getLatest()
+        if (navigationDescriptor == null) {
+            onComplete("MapboxNavigation not initialized; routing tiles unavailable")
+            return
+        }
 
         val mapsDescriptor = offlineManager.createTilesetDescriptor(
             TilesetDescriptorOptions.Builder()
@@ -110,7 +118,7 @@ class OfflineTileManager(private val tileStore: TileStore) {
                 .build()
         )
 
-        val descriptors = listOfNotNull(navigationDescriptor, mapsDescriptor)
+        val descriptors = listOf(navigationDescriptor, mapsDescriptor)
 
         val loadOptions = TileRegionLoadOptions.Builder()
             .geometry(geometry)
@@ -142,11 +150,21 @@ class OfflineTileManager(private val tileStore: TileStore) {
     }
 
     fun removeRegion(regionId: String, styleUrl: String?, onDone: () -> Unit) {
-        tileStore.removeTileRegion(regionId)
-        if (styleUrl != null) {
-            offlineManager.removeStylePack(styleUrl)
+        tileStore.removeTileRegion(regionId) { _ ->
+            if (styleUrl == null) {
+                onDone()
+                return@removeTileRegion
+            }
+            // Style packs are shared across regions by style URI, so only evict the pack once no
+            // tile regions remain — otherwise a sibling region on the same style loses its
+            // glyphs/sprites and can no longer render offline. On a listing error, leave it.
+            tileStore.getAllTileRegions { expected ->
+                if (expected.isValue && (expected.value?.isEmpty() == true)) {
+                    offlineManager.removeStylePack(styleUrl)
+                }
+                onDone()
+            }
         }
-        onDone()
     }
 
     fun listRegions(onResult: (List<Map<String, Any>>) -> Unit) {

@@ -22,8 +22,12 @@ public class ExpoMapboxNavigationModule: Module {
         promise.reject("ERR_OFFLINE_ARGS", "Missing or invalid offline region options")
         return
       }
-      let minZoom = UInt8((options["minZoom"] as? Int) ?? 7)
-      let maxZoom = UInt8((options["maxZoom"] as? Int) ?? 15)
+      // Clamp to a valid tile zoom range (0...22) before converting — UInt8(...) traps on a
+      // negative or >255 value — and normalize order so minZoom <= maxZoom (a reversed range traps).
+      let rawMinZoom = min(max((options["minZoom"] as? Int) ?? 7, 0), 22)
+      let rawMaxZoom = min(max((options["maxZoom"] as? Int) ?? 15, 0), 22)
+      let minZoom = UInt8(min(rawMinZoom, rawMaxZoom))
+      let maxZoom = UInt8(max(rawMinZoom, rawMaxZoom))
 
       // Mapbox offline operations deliver their progress/completion callbacks on the initiating
       // thread's run loop; the Expo AsyncFunction closure runs on a transient background queue that

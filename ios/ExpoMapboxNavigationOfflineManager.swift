@@ -55,7 +55,12 @@ class ExpoMapboxNavigationOfflineManager {
             completion(OfflineTileError.invalidGeometry)
             return
         }
-        let styleURI = StyleURI(rawValue: styleURLString) ?? .streets
+        // Fail rather than silently substitute a different style: a region saved under the wrong
+        // style would render incorrectly (or blank) offline while reporting success.
+        guard let styleURI = StyleURI(rawValue: styleURLString) else {
+            completion(OfflineTileError.invalidStyle)
+            return
+        }
 
         // 1) Style pack (fonts/sprites/style JSON needed to render the map offline).
         guard let stylePackOptions = StylePackLoadOptions(
@@ -145,16 +150,34 @@ class ExpoMapboxNavigationOfflineManager {
         activeDownloads[regionId, default: []].append(cancelable)
     }
 
-    /// Remove a region's tiles (and, when a style URL is given, its style pack). Idempotent.
+    /// Remove a region's tiles, and its style pack only if no other region still needs it. Idempotent.
     func removeRegion(regionId: String, styleURLString: String?, completion: @escaping () -> Void) {
         activeDownloads[regionId]?.forEach { $0.cancel() }
         activeDownloads[regionId] = nil
 
-        tileStore.removeTileRegion(forId: regionId)
-        if let styleURLString, let styleURI = StyleURI(rawValue: styleURLString) {
-            offlineManager.removeStylePack(for: styleURI)
+        let styleURI = styleURLString.flatMap { StyleURI(rawValue: $0) }
+
+        // `removeTileRegion(forId:)` has no completion callback, so decide style-pack eviction from
+        // the region list BEFORE removing. Style packs are shared by style URI, so only evict the
+        // pack when no OTHER region remains — otherwise a sibling region on the same style loses its
+        // glyphs/sprites and can no longer render offline. On a listing error, keep the pack.
+        tileStore.allTileRegions { [weak self] result in
+            guard let self else {
+                completion()
+                return
+            }
+            let otherRegionsRemain: Bool
+            if case .success(let regions) = result {
+                otherRegionsRemain = regions.contains { $0.id != regionId }
+            } else {
+                otherRegionsRemain = true
+            }
+            self.tileStore.removeTileRegion(forId: regionId)
+            if !otherRegionsRemain, let styleURI {
+                self.offlineManager.removeStylePack(for: styleURI)
+            }
+            completion()
         }
-        completion()
     }
 
     /// List the region ids currently present, with their resource progress.
@@ -180,4 +203,5 @@ class ExpoMapboxNavigationOfflineManager {
 enum OfflineTileError: Error {
     case invalidGeometry
     case invalidOptions
+    case invalidStyle
 }

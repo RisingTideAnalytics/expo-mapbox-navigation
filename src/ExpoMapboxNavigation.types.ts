@@ -41,12 +41,13 @@ export type ExpoMapboxNavigationViewRef = {
 };
 
 /**
- * A GeoJSON geometry (Polygon or MultiPolygon) describing the region to download offline tiles for.
- * Coordinates are [longitude, latitude] and rings are closed, per the GeoJSON spec.
+ * A GeoJSON Polygon describing the region to download offline tiles for. Coordinates are an array of
+ * linear rings of [longitude, latitude] positions (first ring is the exterior), closed per the
+ * GeoJSON spec. Only Polygon is supported — the native bridges decode a single polygon ring set.
  */
 export type OfflineTileGeometry = {
-  type: "Polygon" | "MultiPolygon";
-  coordinates: number[][][] | number[][][][];
+  type: "Polygon";
+  coordinates: number[][][];
 };
 
 /**
