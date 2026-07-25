@@ -103,6 +103,10 @@ import java.util.Locale
 
 val PIXEL_DENSITY = Resources.getSystem().displayMetrics.density
 
+// Opaque, non-white backdrops painted under the map so its style-load gap reads dark/light, not white.
+private val BACKDROP_DARK = Color.rgb(31, 31, 33)
+private val BACKDROP_LIGHT = Color.rgb(230, 230, 232)
+
 class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         ExpoView(context, appContext) {
 
@@ -182,6 +186,31 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
                         NavigationBasicGesturesHandler(this)
                 )
             }
+
+    // Paint the view hierarchy opaque + non-white up front so the map's style-load gap never flashes
+    // white; recomputed style-aware once a mapStyle arrives (see setMapStyle).
+    init {
+        applyBackdropColor()
+    }
+
+    // Dark for night/dark styles, light-gray for day/light — never pure white.
+    private fun backdropColor(): Int {
+        val s = currentMapStyle?.lowercase() ?: ""
+        return when {
+            s.contains("night") || s.contains("dark") -> BACKDROP_DARK
+            s.contains("day") || s.contains("light") || s.contains("street") -> BACKDROP_LIGHT
+            else -> BACKDROP_DARK
+        }
+    }
+
+    // Every layer that can show through before the style renders: the ExpoView, its container, and
+    // the MapView.
+    private fun applyBackdropColor() {
+        val c = backdropColor()
+        setBackgroundColor(c)
+        parentConstraintLayout.setBackgroundColor(c)
+        mapView.setBackgroundColor(c)
+    }
 
     private val maneuverViewId = 2
     private val maneuverView = createManueverView(maneuverViewId, parentConstraintLayout)
@@ -491,7 +520,9 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
             setId(id)
             parent.addView(this)
 
-            mapboxMap.loadStyle(Style.MAPBOX_STREETS) { style: Style -> mapboxStyle = style }
+            // Dark placeholder (not the light streets style) until the real mapStyle loads in
+            // performUpdate, so a night nav style doesn't flash light first.
+            mapboxMap.loadStyle(Style.DARK) { style: Style -> mapboxStyle = style }
 
             scalebar.enabled = false
 
@@ -1041,6 +1072,8 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     @com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
     fun setMapStyle(style: String?) {
         currentMapStyle = style
+        // Keep the backdrop in sync with a day<->night change so a mid-session switch can't flash.
+        applyBackdropColor()
         update()
     }
 
