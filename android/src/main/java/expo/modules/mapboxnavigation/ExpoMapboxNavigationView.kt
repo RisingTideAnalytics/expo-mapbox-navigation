@@ -193,14 +193,13 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         applyBackdropColor()
     }
 
-    // Dark for night/dark styles, light-gray for day/light — never pure white.
+    // Only explicitly dark styles get the dark backdrop; everything else (incl. unrecognized URIs)
+    // uses light-gray. Mapbox's style families are light by default, so an unclassifiable URI is far
+    // more likely light — this avoids a dark backdrop under a light style during the load gap. Never
+    // white either way.
     private fun backdropColor(): Int {
         val s = currentMapStyle?.lowercase() ?: ""
-        return when {
-            s.contains("night") || s.contains("dark") -> BACKDROP_DARK
-            s.contains("day") || s.contains("light") || s.contains("street") -> BACKDROP_LIGHT
-            else -> BACKDROP_DARK
-        }
+        return if (s.contains("night") || s.contains("dark")) BACKDROP_DARK else BACKDROP_LIGHT
     }
 
     // Every layer that can show through before the style renders: the ExpoView, its container, and
