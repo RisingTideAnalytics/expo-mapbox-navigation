@@ -242,15 +242,16 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // Clear ownership synchronously so an incoming controller sees no owner; the UIKit/session
         // teardown must hop to the main actor (deinit is nonisolated), so it's async best-effort —
         // the real single-session guarantee is teardownForHandoff() before startActiveGuidance.
-        // Only idle the shared session if we still own it, to not kill a newer controller's guidance.
         let session = tripSession
         let navVC = navigationViewController
-        let ownsSession = ExpoMapboxNavigationViewController.activeController === self
-        if ownsSession {
+        if ExpoMapboxNavigationViewController.activeController === self {
             ExpoMapboxNavigationViewController.activeController = nil
         }
         DispatchQueue.main.async {
-            if ownsSession {
+            // Re-check ownership here rather than a captured flag: a replacement controller can take
+            // over the shared session between deinit and this closure, and idling it would stop its
+            // just-started guidance. nil owner means nobody's using it, so it's safe to idle.
+            if ExpoMapboxNavigationViewController.activeController == nil {
                 session?.setToIdle()
             }
             // Per-instance, so always safe to remove (unlike the shared session above).
@@ -279,6 +280,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
         super.viewWillAppear(animated)
         // Reactivate when view appears
         isActive = true
+        // If a handoff tore our navigation down while hidden, rebuild it now we're visible again —
+        // otherwise the view would show only its backdrop until the next prop change.
+        if navigationViewController == nil && currentCoordinates != nil {
+            update()
+        }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
