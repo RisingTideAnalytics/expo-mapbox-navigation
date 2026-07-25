@@ -43,6 +43,9 @@ class ExpoMapboxNavigationView: ExpoView {
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
         clipsToBounds = true
+        // Non-white so the async style load can't flash white; controller repaints per uiStyle later.
+        backgroundColor = ExpoMapboxNavigationViewController.nightBackdropColor
+        isOpaque = true
         addSubview(controller.view)
 
         controller.onRouteProgressChanged = onRouteProgressChanged
@@ -66,6 +69,14 @@ class ExpoMapboxNavigationView: ExpoView {
 class ExpoMapboxNavigationViewController: UIViewController {
     // Use a shared navigation provider but create separate instances for each view
     static let navigationProvider: MapboxNavigationProvider = MapboxNavigationProvider(coreConfig: CoreConfig(routingConfig: RoutingConfig(fasterRouteDetectionConfig: Optional<FasterRouteDetectionConfig>.none),locationSource: .live ))
+
+    // The provider and its trip session are shared across instances, so a starting controller must
+    // tear down the previous owner or two controllers drive one session. weak to not retain it.
+    static weak var activeController: ExpoMapboxNavigationViewController? = nil
+
+    // Painted under the map so the style-load / handoff gap reads dark/light instead of white.
+    static let nightBackdropColor = UIColor(red: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)
+    static let dayBackdropColor = UIColor(red: 0.90, green: 0.90, blue: 0.91, alpha: 1.0)
 
     // Instance-specific navigation components
     var mapboxNavigation: MapboxNavigation? = nil
@@ -228,14 +239,24 @@ class ExpoMapboxNavigationViewController: UIViewController {
         sessionCancellable = nil
         locationCancellable = nil
 
-        // Stop navigation session on main thread
+        // Clear ownership synchronously so an incoming controller sees no owner; the UIKit/session
+        // teardown must hop to the main actor (deinit is nonisolated), so it's async best-effort —
+        // the real single-session guarantee is teardownForHandoff() before startActiveGuidance.
         let session = tripSession
         let navVC = navigationViewController
+        if ExpoMapboxNavigationViewController.activeController === self {
+            ExpoMapboxNavigationViewController.activeController = nil
+        }
         DispatchQueue.main.async {
-            session?.setToIdle()
-
-            // Remove navigation view controller
+            // Re-check ownership here rather than a captured flag: a replacement controller can take
+            // over the shared session between deinit and this closure, and idling it would stop its
+            // just-started guidance. nil owner means nobody's using it, so it's safe to idle.
+            if ExpoMapboxNavigationViewController.activeController == nil {
+                session?.setToIdle()
+            }
+            // Per-instance, so always safe to remove (unlike the shared session above).
             if let navVC = navVC {
+                navVC.delegate = nil
                 navVC.willMove(toParent: nil)
                 navVC.view.removeFromSuperview()
                 navVC.removeFromParent()
@@ -259,6 +280,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
         super.viewWillAppear(animated)
         // Reactivate when view appears
         isActive = true
+        // If a handoff tore our navigation down while hidden, rebuild it now we're visible again —
+        // otherwise the view would show only its backdrop until the next prop change.
+        if navigationViewController == nil && currentCoordinates != nil {
+            update()
+        }
     }
 
     override func viewDidDisappear(_ animated: Bool) {
@@ -278,11 +304,16 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     private func cleanupNavigationSession() {
-        // This must be called on main thread
-        tripSession?.setToIdle()
+        // This must be called on main thread.
+        // Only idle the shared session if we still own it, or we kill a newer controller's guidance.
+        if ExpoMapboxNavigationViewController.activeController === self {
+            tripSession?.setToIdle()
+            ExpoMapboxNavigationViewController.activeController = nil
+        }
 
-        // Clean up navigation view controller
+        // Per-instance, always safe.
         if let navVC = navigationViewController {
+            navVC.delegate = nil
             navVC.willMove(toParent: nil)
             navVC.view.removeFromSuperview()
             navVC.removeFromParent()
@@ -290,13 +321,61 @@ class ExpoMapboxNavigationViewController: UIViewController {
         navigationViewController = nil
     }
 
+    // Lets an incoming controller start without a second session/VC coexisting. Doesn't idle the
+    // shared session — the incoming startActiveGuidance resets it.
+    func teardownForHandoff() {
+        isActive = false
+        // Invalidate in-flight route work so a stale result can't retake the shared session when this
+        // view later reappears and reactivates. Bump the generation only — do NOT cancel the task: the
+        // request must run to completion or MapboxNavigationCore leaks its continuation (crash). The
+        // bumped generation makes the awaited result and any queued delayed setup fail their guards.
+        routeRequestGeneration += 1
+        if let navVC = navigationViewController {
+            navVC.delegate = nil
+            navVC.willMove(toParent: nil)
+            navVC.view.removeFromSuperview()
+            navVC.removeFromParent()
+        }
+        navigationViewController = nil
+        if ExpoMapboxNavigationViewController.activeController === self {
+            ExpoMapboxNavigationViewController.activeController = nil
+        }
+    }
+
     required init?(coder aDecoder: NSCoder) {
         super.init(coder: aDecoder)
         fatalError("This controller should not be loaded through a story board")
     }
 
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // No map surface yet — paint the container so it isn't white.
+        view.backgroundColor = backdropColor()
+        view.isOpaque = true
+    }
+
+    // Never pure white, so the style-load gap is unobtrusive.
+    private func backdropColor() -> UIColor {
+        return currentUIStyle == "night"
+            ? ExpoMapboxNavigationViewController.nightBackdropColor
+            : ExpoMapboxNavigationViewController.dayBackdropColor
+    }
+
+    // Every layer that can show through before the style loads needs painting, not just one.
+    private func applyBackdropColor() {
+        let color = backdropColor()
+        view.backgroundColor = color
+        view.isOpaque = true
+        if let navigationMapView = navigationViewController?.navigationMapView {
+            navigationMapView.backgroundColor = color
+            navigationMapView.mapView.backgroundColor = color
+        }
+    }
+
     func setUIStyle(style: String?) {
         currentUIStyle = style
+        // Resync so a mid-session day/night switch can't flash.
+        applyBackdropColor()
         update()
     }
 
@@ -543,7 +622,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                 ])
                 print(error.localizedDescription)
             case .success(let navigationRoutes):
-                onRoutesCalculated(navigationRoutes: navigationRoutes)
+                onRoutesCalculated(navigationRoutes: navigationRoutes, generation: generation)
             }
         }
     }
@@ -572,7 +651,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                 ])
                 print(error.localizedDescription)
             case .success(let navigationRoutes):
-                onRoutesCalculated(navigationRoutes: navigationRoutes)
+                onRoutesCalculated(navigationRoutes: navigationRoutes, generation: generation)
             }
         }
     }
@@ -680,13 +759,19 @@ class ExpoMapboxNavigationViewController: UIViewController {
         ]
     }
 
-    func onRoutesCalculated(navigationRoutes: NavigationRoutes){
+    func onRoutesCalculated(navigationRoutes: NavigationRoutes, generation: Int){
+        // Guard every hop on the REQUEST's generation (passed in), never a re-read of the current
+        // value: a handoff or newer request bumps it, so a result that started earlier is dropped
+        // instead of adopting the new generation and reclaiming the session with stale routes.
         // Ensure we're on the main thread
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.isActive else { return }
+            guard let self = self, self.isActive, generation == self.routeRequestGeneration else { return }
 
-            // Stop any existing navigation session before starting a new one
-            self.tripSession?.setToIdle()
+            // Don't idle the shared session if another controller owns it — that kills its guidance.
+            if ExpoMapboxNavigationViewController.activeController == nil
+                || ExpoMapboxNavigationViewController.activeController === self {
+                self.tripSession?.setToIdle()
+            }
 
             // Clean up existing navigation view controller if any
             if let existingNavVC = self.navigationViewController {
@@ -699,7 +784,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
             // Small delay to ensure previous session is fully cleaned up
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self = self, self.isActive else { return }
+                guard let self = self, self.isActive, generation == self.routeRequestGeneration else { return }
                 self.setupNavigationViewController(with: navigationRoutes)
             }
         }
@@ -747,6 +832,8 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
         let navigationMapView = navigationViewController.navigationMapView
         navigationMapView!.puckType = .puck2D(.navigationDefault)
+        // Paint before the async loadStyle below, or the map is white until it resolves.
+        applyBackdropColor()
 
         if(initialLocation != nil){
             // Validate zoom to prevent NaN errors
@@ -791,6 +878,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
         // Only start active guidance if this instance is still active
         if isActive {
+            // Tear down the previous owner before starting, or two sessions coexist on the shared provider.
+            if let previous = ExpoMapboxNavigationViewController.activeController, previous !== self {
+                previous.teardownForHandoff()
+            }
+            ExpoMapboxNavigationViewController.activeController = self
             mapboxNavigation!.tripSession().startActiveGuidance(with: navigationRoutes, startLegIndex: 0)
         }
 
