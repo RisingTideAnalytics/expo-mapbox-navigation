@@ -623,7 +623,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                 ])
                 print(error.localizedDescription)
             case .success(let navigationRoutes):
-                onRoutesCalculated(navigationRoutes: navigationRoutes)
+                onRoutesCalculated(navigationRoutes: navigationRoutes, generation: generation)
             }
         }
     }
@@ -652,7 +652,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                 ])
                 print(error.localizedDescription)
             case .success(let navigationRoutes):
-                onRoutesCalculated(navigationRoutes: navigationRoutes)
+                onRoutesCalculated(navigationRoutes: navigationRoutes, generation: generation)
             }
         }
     }
@@ -760,10 +760,10 @@ class ExpoMapboxNavigationViewController: UIViewController {
         ]
     }
 
-    func onRoutesCalculated(navigationRoutes: NavigationRoutes){
-        // Snapshot the request generation so a handoff (which bumps it) or a newer request drops this
-        // stale result instead of letting it retake the session after the view reappears.
-        let generation = routeRequestGeneration
+    func onRoutesCalculated(navigationRoutes: NavigationRoutes, generation: Int){
+        // Guard every hop on the REQUEST's generation (passed in), never a re-read of the current
+        // value: a handoff or newer request bumps it, so a result that started earlier is dropped
+        // instead of adopting the new generation and reclaiming the session with stale routes.
         // Ensure we're on the main thread
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.isActive, generation == self.routeRequestGeneration else { return }
