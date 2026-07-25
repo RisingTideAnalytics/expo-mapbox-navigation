@@ -326,10 +326,9 @@ class ExpoMapboxNavigationViewController: UIViewController {
     func teardownForHandoff() {
         isActive = false
         // Invalidate in-flight route work so a stale result can't retake the shared session when this
-        // view later reappears and reactivates: cancel the request and bump the generation so both the
-        // awaited task result and any queued delayed setup are dropped.
-        calculateRoutesTask?.cancel()
-        calculateRoutesTask = nil
+        // view later reappears and reactivates. Bump the generation only — do NOT cancel the task: the
+        // request must run to completion or MapboxNavigationCore leaks its continuation (crash). The
+        // bumped generation makes the awaited result and any queued delayed setup fail their guards.
         routeRequestGeneration += 1
         if let navVC = navigationViewController {
             navVC.delegate = nil
