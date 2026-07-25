@@ -325,6 +325,12 @@ class ExpoMapboxNavigationViewController: UIViewController {
     // shared session — the incoming startActiveGuidance resets it.
     func teardownForHandoff() {
         isActive = false
+        // Invalidate in-flight route work so a stale result can't retake the shared session when this
+        // view later reappears and reactivates: cancel the request and bump the generation so both the
+        // awaited task result and any queued delayed setup are dropped.
+        calculateRoutesTask?.cancel()
+        calculateRoutesTask = nil
+        routeRequestGeneration += 1
         if let navVC = navigationViewController {
             navVC.delegate = nil
             navVC.willMove(toParent: nil)
@@ -755,9 +761,12 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     func onRoutesCalculated(navigationRoutes: NavigationRoutes){
+        // Snapshot the request generation so a handoff (which bumps it) or a newer request drops this
+        // stale result instead of letting it retake the session after the view reappears.
+        let generation = routeRequestGeneration
         // Ensure we're on the main thread
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.isActive else { return }
+            guard let self = self, self.isActive, generation == self.routeRequestGeneration else { return }
 
             // Don't idle the shared session if another controller owns it — that kills its guidance.
             if ExpoMapboxNavigationViewController.activeController == nil
@@ -776,7 +785,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
             // Small delay to ensure previous session is fully cleaned up
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                guard let self = self, self.isActive else { return }
+                guard let self = self, self.isActive, generation == self.routeRequestGeneration else { return }
                 self.setupNavigationViewController(with: navigationRoutes)
             }
         }
