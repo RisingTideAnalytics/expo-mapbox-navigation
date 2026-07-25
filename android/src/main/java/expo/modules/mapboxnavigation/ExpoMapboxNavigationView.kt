@@ -519,10 +519,8 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
             setId(id)
             parent.addView(this)
 
-            // Dark placeholder (not the light streets style) until the real mapStyle loads in
-            // performUpdate, so a night nav style doesn't flash light first.
-            mapboxMap.loadStyle(Style.DARK) { style: Style -> mapboxStyle = style }
-
+            // No placeholder style here — rendering one before the requested mapStyle loads flashes a
+            // wrong color. The opaque backdrop covers the gap; performUpdate loads the actual style.
             scalebar.enabled = false
 
             location.apply {
@@ -1181,6 +1179,14 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
 
         if (currentMapStyle != null) {
             mapboxMap.loadStyle(currentMapStyle!!) { style: Style ->
+                mapboxStyle = style
+                style.localizeLabels(currentLocale)
+                addCustomRasterLayer()
+            }
+        } else if (mapboxStyle == null) {
+            // No mapStyle prop and nothing loaded yet — load a neutral default so the map renders
+            // (replaces the old construction-time placeholder; deferred so it can't flash first).
+            mapboxMap.loadStyle(Style.MAPBOX_STREETS) { style: Style ->
                 mapboxStyle = style
                 style.localizeLabels(currentLocale)
                 addCustomRasterLayer()
