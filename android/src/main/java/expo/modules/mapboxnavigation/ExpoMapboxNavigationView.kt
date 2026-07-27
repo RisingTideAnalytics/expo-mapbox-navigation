@@ -122,7 +122,6 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     }
 
     private var isMuted = false
-    private var hasAppliedInitialMute = false
     // Coalesces the burst of per-prop update() calls React applies each render into a
     // single recalculation (see update()).
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -230,12 +229,7 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     private val soundButtonId = 4
     private val soundButton =
             createSoundButton(soundButtonId, parentConstraintLayout) {
-                voiceInstructionsPlayer.volume(SpeechVolume(if (isMuted) 1.0f else 0.0f))
-                it.findViewById<ImageView>(com.mapbox.navigation.ui.components.R.id.buttonIcon)
-                        .setImageResource(
-                                if (isMuted) R.drawable.icon_sound else R.drawable.icon_mute
-                        )
-                isMuted = !isMuted
+                applyMuteState(!isMuted)
                 onMuteChange(mapOf("isMuted" to isMuted))
             }
 
@@ -330,6 +324,11 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
                 )
             }
     private val voiceInstructionsObserver = VoiceInstructionsObserver { voiceInstructions ->
+        // Muting must do more than zero the playback volume. MapboxVoiceInstructionsPlayer requests
+        // Android audio focus (AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK) before every announcement, so
+        // playing at volume 0 still ducked music from other apps at each maneuver while muted.
+        // Skipping generation entirely also avoids the voice-mp3 fetch. See applyMuteState.
+        if (isMuted) return@VoiceInstructionsObserver
         speechApi.generate(voiceInstructions, speechCallback)
     }
 
@@ -1074,17 +1073,35 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         update()
     }
 
-    fun setIsMuted(isMutedProp: Boolean?) {
-        // Treated as the INITIAL mute state only; applied once so it does not fight the
-        // native sound button mid-trip (the button and this prop share `isMuted`).
-        if (isMutedProp != null && !hasAppliedInitialMute) {
-            hasAppliedInitialMute = true
-            isMuted = isMutedProp
-            voiceInstructionsPlayer.volume(SpeechVolume(if (isMuted) 0.0f else 1.0f))
-            soundButton
-                    .findViewById<ImageView>(com.mapbox.navigation.ui.components.R.id.buttonIcon)
-                    .setImageResource(if (isMuted) R.drawable.icon_mute else R.drawable.icon_sound)
+    /**
+     * Single entry point for changing the mute state: keeps `isMuted`, the player volume and the
+     * sound-button icon in step, and releases audio focus when muting.
+     *
+     * Zeroing the volume alone is not enough. MapboxSpeechApi and MapboxVoiceInstructionsPlayer
+     * still run for every instruction, and the player takes Android audio focus before each
+     * (silent) playback, so other apps' audio ducked at every maneuver while muted. Generation is
+     * gated in `voiceInstructionsObserver`; anything already in flight is dropped here so focus is
+     * given back immediately rather than after an inaudible announcement finishes.
+     */
+    private fun applyMuteState(muted: Boolean) {
+        isMuted = muted
+        voiceInstructionsPlayer.volume(SpeechVolume(if (muted) 0.0f else 1.0f))
+        soundButton
+                .findViewById<ImageView>(com.mapbox.navigation.ui.components.R.id.buttonIcon)
+                .setImageResource(if (muted) R.drawable.icon_mute else R.drawable.icon_sound)
+        if (muted) {
+            speechApi.cancel()
+            voiceInstructionsPlayer.clear()
         }
+    }
+
+    fun setIsMuted(isMutedProp: Boolean?) {
+        // No-op when unchanged rather than "apply once": a fresh view starts un-muted (the icon and
+        // the player's default volume already agree), and ignoring an equal value is what keeps a
+        // JS round-trip (button tap -> onMuteChange -> persisted state -> this prop) from fighting
+        // the state the native button just set.
+        if (isMutedProp == null || isMutedProp == isMuted) return
+        applyMuteState(isMutedProp)
     }
 
     fun setInitialLocation(initialLocation: Point?, zoom: Double?) {
@@ -1170,6 +1187,12 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
 
     @com.mapbox.navigation.base.ExperimentalPreviewMapboxNavigationAPI
     private fun performUpdate() {
+        // Release the outgoing instances before replacing them. A MapboxVoiceInstructionsPlayer owns
+        // a TTS engine, a MediaPlayer and — while announcing — Android audio focus, so an orphaned
+        // one keeps other apps' audio ducked with nothing left to stop it.
+        speechApi.cancel()
+        voiceInstructionsPlayer.shutdown()
+
         voiceInstructionsPlayer =
                 MapboxVoiceInstructionsPlayer(context, currentLocale.toLanguageTag())
         voiceInstructionsPlayer.volume(
