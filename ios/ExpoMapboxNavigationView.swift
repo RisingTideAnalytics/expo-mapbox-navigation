@@ -131,6 +131,21 @@ class ExpoMapboxNavigationViewController: UIViewController {
     private var sessionCancellable: AnyCancellable? = nil
     private var locationCancellable: AnyCancellable? = nil
 
+    // Our own recenter control. The drop-in UI already has one — NavigationView.resumeButton — but
+    // NavigationViewLayout pins it bottom-leading, ~10pt above bottomBannerContainerView, which is
+    // exactly where a host app's bottom sheet sits. In GroundSwell the TBT overlay covers it, so
+    // once the driver taps overview there is no visible way back to the following camera (MOB-414).
+    // hideTripProgress does not help: it hides the bottom banner without removing the pill's
+    // constraint. MapOrnamentPosition offers only .topLeading/.topTrailing, so the pill cannot be
+    // relocated — hence a button of our own in the floating stack, mirroring Android's
+    // MapboxRecenterButton (android/.../ExpoMapboxNavigationView.kt:244).
+    private var recenterButton: FloatingButton? = nil
+    private var cameraStateCancellable: AnyCancellable? = nil
+    // The camera reports .idle from construction until guidance yields a first fix, so an .idle
+    // seen before the first .following is startup, not a user pan. Latching .following is what
+    // keeps the button from flashing on every route load and reroute.
+    private var hasEnteredFollowingCamera: Bool = false
+
     var currentUIStyle: String? = nil
 
     init() {
@@ -231,6 +246,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         reroutingCancellable?.cancel()
         sessionCancellable?.cancel()
         locationCancellable?.cancel()
+        cameraStateCancellable?.cancel()
 
         // Nil out the cancellables
         routeProgressCancellable = nil
@@ -238,12 +254,18 @@ class ExpoMapboxNavigationViewController: UIViewController {
         reroutingCancellable = nil
         sessionCancellable = nil
         locationCancellable = nil
+        cameraStateCancellable = nil
+        hasEnteredFollowingCamera = false
 
         // Clear ownership synchronously so an incoming controller sees no owner; the UIKit/session
         // teardown must hop to the main actor (deinit is nonisolated), so it's async best-effort —
         // the real single-session guarantee is teardownForHandoff() before startActiveGuidance.
         let session = tripSession
         let navVC = navigationViewController
+        // UIControl holds targets unowned, so this must be dropped on the main actor before the
+        // button can outlive us. Captured like navVC because deinit is nonisolated.
+        let button = recenterButton
+        recenterButton = nil
         if ExpoMapboxNavigationViewController.activeController === self {
             ExpoMapboxNavigationViewController.activeController = nil
         }
@@ -254,6 +276,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
             if ExpoMapboxNavigationViewController.activeController == nil {
                 session?.setToIdle()
             }
+            button?.removeTarget(nil, action: nil, for: .allEvents)
             // Per-instance, so always safe to remove (unlike the shared session above).
             if let navVC = navVC {
                 navVC.delegate = nil
@@ -312,6 +335,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         }
 
         // Per-instance, always safe.
+        teardownRecenterButton()
         if let navVC = navigationViewController {
             navVC.delegate = nil
             navVC.willMove(toParent: nil)
@@ -330,6 +354,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // request must run to completion or MapboxNavigationCore leaks its continuation (crash). The
         // bumped generation makes the awaited result and any queued delayed setup fail their guards.
         routeRequestGeneration += 1
+        teardownRecenterButton()
         if let navVC = navigationViewController {
             navVC.delegate = nil
             navVC.willMove(toParent: nil)
@@ -669,6 +694,109 @@ class ExpoMapboxNavigationViewController: UIViewController {
         }
     }
 
+    @objc func recenterButtonTapped(_ sender: AnyObject?) {
+        recenterMap()
+    }
+
+    // Adds a recenter button to the drop-in UI's floating stack, and neutralizes the SDK's own
+    // resume pill (which is stranded under the host app's bottom sheet). See recenterButton.
+    @MainActor
+    private func installRecenterButton(in navVC: NavigationViewController) {
+        // rounded() is generic over T: FloatingButton, so the result type has to be annotated.
+        // An SF Symbol keeps this free of a resource bundle: the pod declares no resources, and
+        // it is a static framework, so reaching the SDK's own `recenter` asset would mean
+        // hard-coding an SPM-generated bundle name that can change on any SDK bump.
+        let symbol = UIImage(
+            systemName: "location.north.line.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 20, weight: .medium)
+        ) ?? UIImage(systemName: "location.fill")
+        let button: FloatingButton = FloatingButton.rounded(image: symbol)
+        button.accessibilityLabel = NSLocalizedString(
+            "RESUME",
+            value: "Resume",
+            comment: "Return the camera to following the user's location"
+        )
+        button.accessibilityIdentifier = "expo.mapbox.recenterButton"
+        // Start hidden, like Android's initial GONE: the camera is .idle until guidance produces a
+        // first fix, and a visible button in that window reads as a flash on every route load.
+        button.isHidden = true
+        button.addTarget(self, action: #selector(recenterButtonTapped(_:)), for: .touchUpInside)
+        // No explicit colors: FloatingButton picks up backgroundColor/tintColor/border from the
+        // Day/NightStyle appearance proxy, which is class-level and so covers our instance too.
+        recenterButton = button
+
+        // floatingButtons is a *stored* [UIButton]? whose didSet rebuilds floatingStackView, and it
+        // is assigned exactly once, in NavigationViewController.loadView(), as
+        // [overviewButton, muteButton, reportButton]. A read-modify-write is therefore lossless:
+        // the VC holds those three as lazy strong refs, and addTarget state lives on each UIControl
+        // instance rather than on the stack view, so the clear-and-re-add preserves them.
+        // Index 0 matters: the SDK hides overviewButton in .overview/.idle, so the compass lands in
+        // the slot overview vacates. The stack never changes height and nothing shifts.
+        if var buttons = navVC.floatingButtons {
+            buttons.insert(button, at: 0)
+            navVC.floatingButtons = buttons
+        } else {
+            NSLog("[Recenter] floatingButtons was nil; installing compass alone")
+            navVC.floatingButtons = [button]
+        }
+
+        // The SDK's resume pill is unreachable under the host's bottom sheet and can tint through
+        // its blur. alpha, not isHidden: OrnamentsController rewrites isHidden on every transition
+        // to .idle/.overview, but never touches alpha.
+        if let resume = navVC.navigationView.findViews(subclassOf: ResumeButton.self).first {
+            resume.alpha = 0
+            resume.isUserInteractionEnabled = false
+        } else {
+            NSLog("[Recenter] SDK ResumeButton not found; nothing to suppress")
+        }
+
+        observeCameraState(navVC)
+    }
+
+    @MainActor
+    private func observeCameraState(_ navVC: NavigationViewController) {
+        cameraStateCancellable?.cancel()
+        hasEnteredFollowingCamera = false
+        guard let camera = navVC.navigationMapView?.navigationCamera else {
+            NSLog("[Recenter] no navigationCamera to observe")
+            return
+        }
+        // No .receive(on:): NavigationCamera is @MainActor, so emissions already arrive on main —
+        // same convention as the other sinks in this file. No view.window check either, unlike
+        // those: this is an idempotent UI write that dispatches no event, and skipping updates
+        // while offscreen would leave the button stale when the view comes back.
+        cameraStateCancellable = camera.cameraStates.sink { [weak self] state in
+            guard let self = self, self.isActive, let button = self.recenterButton else { return }
+            switch state {
+            case .following:
+                self.hasEnteredFollowingCamera = true
+                button.isHidden = true
+            case .overview:
+                button.isHidden = false
+            case .idle:
+                // cameraStates replays on subscribe and we install before startActiveGuidance, so
+                // the first value is a construction-time .idle. Only once we have actually followed
+                // does .idle mean the driver panned away. (.dropFirst() would break if the
+                // publisher ever stopped replaying.)
+                button.isHidden = !self.hasEnteredFollowingCamera
+            @unknown default:
+                // Non-frozen enum across a library-evolution module boundary: a future state we
+                // don't know about is safest treated as "not following", i.e. offer the way back.
+                button.isHidden = !self.hasEnteredFollowingCamera
+            }
+        }
+    }
+
+    private func teardownRecenterButton() {
+        cameraStateCancellable?.cancel()
+        cameraStateCancellable = nil
+        hasEnteredFollowingCamera = false
+        // UIControl holds its targets unowned, so a target left behind would dangle if the button
+        // ever outlived this controller. Cheap enough to do unconditionally.
+        recenterButton?.removeTarget(nil, action: nil, for: .allEvents)
+        recenterButton = nil
+    }
+
     private func findMuteButton(in navVC: NavigationViewController) -> UIButton? {
         // Primary: reflection. The mute button is a private lazy `muteButton: FloatingButton` on the
         // nav VC (or its OrnamentsController). object_getIvar is only called on name-matched ivars
@@ -774,6 +902,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
             }
 
             // Clean up existing navigation view controller if any
+            self.teardownRecenterButton()
             if let existingNavVC = self.navigationViewController {
                 existingNavVC.delegate = nil
                 existingNavVC.willMove(toParent: nil)
@@ -863,6 +992,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
         if hideTripProgress {
             navigationViewController.navigationView.bottomBannerContainerView.isHidden = true
         }
+
+        // Synchronous, not deferred: navigationView was touched above so loadView() has run (and
+        // the floatingButtons accessor calls loadViewIfNeeded() itself), and doing it here avoids
+        // the deferred-block hazard where a teardownForHandoff() lands first.
+        installRecenterButton(in: navigationViewController)
 
         navigationViewController.delegate = self
         addChild(navigationViewController)
