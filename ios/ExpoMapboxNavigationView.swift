@@ -70,6 +70,27 @@ class ExpoMapboxNavigationViewController: UIViewController {
     // Use a shared navigation provider but create separate instances for each view
     static let navigationProvider: MapboxNavigationProvider = MapboxNavigationProvider(coreConfig: CoreConfig(routingConfig: RoutingConfig(fasterRouteDetectionConfig: Optional<FasterRouteDetectionConfig>.none),locationSource: .live ))
 
+    // MapboxNavigationProvider.routeVoiceController is COMPUTED, not lazily stored: its getter
+    // calls RouteVoiceController.init(routeProgressing:...) and TTSConfig.speechSynthesizer(...),
+    // so every access hands back a brand-new controller wrapping a brand-new synthesizer. (Verified
+    // against the vendored binary: the getter's callees include those two inits, and there is no
+    // $__lazy_storage_$_routeVoiceController symbol.)
+    //
+    // Every use in this file assumes the opposite — a stable singleton — so reading the provider
+    // property directly was wrong four different ways: setIsMuted muted a throwaway that was
+    // released moments later (so the `mute` prop never reached the speaking instance), the two
+    // `.muted` reads always saw a fresh instance's default of false, and each navigation session
+    // handed its NavigationViewController a different synthesizer while the outgoing session's
+    // synthesizer stayed alive until its view controller deallocated — two owners of one
+    // AVAudioSession, which is the shape of "voice worked on the first leg and went silent on the
+    // second" (MOB-414).
+    //
+    // Access the provider property exactly once and share the result. The publishers it subscribes
+    // to are provider-level, not trip-session-level, so one instance keeps working across the
+    // setToIdle/startActiveGuidance cycle that each new leg performs.
+    @MainActor static let sharedVoiceController: RouteVoiceController =
+        ExpoMapboxNavigationViewController.navigationProvider.routeVoiceController
+
     // The provider and its trip session are shared across instances, so a starting controller must
     // tear down the previous owner or two controllers drive one session. weak to not retain it.
     static weak var activeController: ExpoMapboxNavigationViewController? = nil
@@ -188,7 +209,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                     "distanceTraveled": progressState!.routeProgress.distanceTraveled,
                     "durationRemaining": progressState!.routeProgress.durationRemaining,
                     "fractionTraveled": progressState!.routeProgress.fractionTraveled,
-                    "isMuted": ExpoMapboxNavigationViewController.navigationProvider.routeVoiceController.speechSynthesizer.muted,
+                    "isMuted": ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted,
                 ])
             }
         }
@@ -536,7 +557,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
     func setIsMuted(isMuted: Bool?){
         if(isMuted != nil){
-            ExpoMapboxNavigationViewController.navigationProvider.routeVoiceController.speechSynthesizer.muted = isMuted!
+            ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted = isMuted!
         }
     }
 
@@ -938,7 +959,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
         let navigationOptions = NavigationOptions(
             mapboxNavigation: self.mapboxNavigation!,
-            voiceController: ExpoMapboxNavigationViewController.navigationProvider.routeVoiceController,
+            voiceController: ExpoMapboxNavigationViewController.sharedVoiceController,
             eventsManager: ExpoMapboxNavigationViewController.navigationProvider.eventsManager(),
             styles: uiStyles,
             topBanner: topBanner,
@@ -1024,7 +1045,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // action keys off isSelected) and observe taps to persist the value back to RN.
         DispatchQueue.main.async { [weak self, weak navigationViewController] in
             guard let self = self, let navVC = navigationViewController, self.isActive else { return }
-            let muted = ExpoMapboxNavigationViewController.navigationProvider.routeVoiceController.speechSynthesizer.muted
+            let muted = ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted
             guard let muteButton = self.findMuteButton(in: navVC) else {
                 NSLog("[AudibleDirections] mute button NOT found")
                 self.onMuteChange?(["isMuted": muted, "source": "setup-notfound"])
