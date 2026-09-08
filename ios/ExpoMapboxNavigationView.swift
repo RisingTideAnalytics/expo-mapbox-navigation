@@ -362,7 +362,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // If a handoff tore our navigation down while hidden, rebuild it now we're visible again —
         // otherwise the view would show only its backdrop until the next prop change.
         if navigationViewController == nil && currentCoordinates != nil {
-            update()
+            update("viewWillAppear")
         }
     }
 
@@ -455,10 +455,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     func setUIStyle(style: String?) {
+        if isRedundant(style == currentUIStyle) { return }
         currentUIStyle = style
         // Resync so a mid-session day/night switch can't flash.
         applyBackdropColor()
-        update()
+        update("setUIStyle")
     }
 
     func addCustomRasterLayer() {
@@ -502,88 +503,131 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
 
+    // React re-applies EVERY prop on each render, not just the ones whose value changed: one mute
+    // toggle re-runs all seventeen of the setters below. Each used to call update() unconditionally,
+    // so any re-render recalculated the route and rebuilt the NavigationViewController — the whole
+    // TBT skin visibly refreshing on a mute tap. That was invisible until MOB-415 made a mute
+    // actually reach Redux and re-render the screen; the ~1 Hz progress re-render never tripped it
+    // because those props were already stable. Android has always no-opped on an unchanged value
+    // (setIsMuted / applyMuteState); this brings iOS in line.
+    //
+    // The navigationViewController != nil clause is load-bearing, not belt-and-braces:
+    // teardownForHandoff() nils the controller while this view stays mounted, and viewWillAppear
+    // only rebuilds if the view genuinely re-appears. Without it a same-value re-application after a
+    // handoff would skip the rebuild and leave the driver on a blank skin.
+    private func isRedundant(_ unchanged: Bool) -> Bool {
+        return unchanged && navigationViewController != nil
+    }
+
+    /// CLLocationCoordinate2D is not Equatable. Exact comparison is what we want here — the question
+    /// is "did this prop change at all", not "are these points near each other" — and the values
+    /// round-trip from the same JS numbers each render, so they are bit-identical when unchanged.
+    private func coordinatesEqual(_ a: Array<CLLocationCoordinate2D>?, _ b: Array<CLLocationCoordinate2D>?) -> Bool {
+        guard let a = a, let b = b else { return a == nil && b == nil }
+        guard a.count == b.count else { return false }
+        for (l, r) in zip(a, b) where l.latitude != r.latitude || l.longitude != r.longitude {
+            return false
+        }
+        return true
+    }
+
     func setCoordinates(coordinates: Array<CLLocationCoordinate2D>) {
+        if isRedundant(coordinatesEqual(coordinates, currentCoordinates)) { return }
         currentCoordinates = coordinates
-        update()
+        update("setCoordinates")
     }
 
     func setVehicleMaxHeight(maxHeight: Double?) {
+        if isRedundant(maxHeight == vehicleMaxHeight) { return }
         vehicleMaxHeight = maxHeight
-        update()
+        update("setVehicleMaxHeight")
     }
 
     func setVehicleMaxWidth(maxWidth: Double?) {
+        if isRedundant(maxWidth == vehicleMaxWidth) { return }
         vehicleMaxWidth = maxWidth
-        update()
+        update("setVehicleMaxWidth")
     }
 
     func setVehicleMaxWeight(maxWeight: Double?) {
+        if isRedundant(maxWeight == vehicleMaxWeight) { return }
         vehicleMaxWeight = maxWeight
-        update()
+        update("setVehicleMaxWeight")
     }
 
     func setAllowsArrivingOnOppositeSide(allows: Bool?) {
+        if isRedundant(allows == allowsArrivingOnOppositeSide) { return }
         allowsArrivingOnOppositeSide = allows
-        update()
+        update("setAllowsArrivingOnOppositeSide")
     }
 
     func setShowsEndOfRouteFeedback(shows: Bool?) {
+        if isRedundant(shows == showsEndOfRouteFeedback) { return }
         showsEndOfRouteFeedback = shows
-        update()
+        update("setShowsEndOfRouteFeedback")
     }
 
     func setHideTripProgress(hide: Bool?) {
-        hideTripProgress = hide ?? false
-        update()
+        let newValue = hide ?? false
+        if isRedundant(newValue == hideTripProgress) { return }
+        hideTripProgress = newValue
+        update("setHideTripProgress")
     }
 
     func setLocale(locale: String?) {
-        if(locale != nil){
-            currentLocale = Locale(identifier: locale!)
-        } else {
-            currentLocale = Locale.current
-        }
-        update()
+        let newLocale = locale != nil ? Locale(identifier: locale!) : Locale.current
+        if isRedundant(newLocale == currentLocale) { return }
+        currentLocale = newLocale
+        update("setLocale")
     }
 
     func setIsUsingRouteMatchingApi(useRouteMatchingApi: Bool?){
-        isUsingRouteMatchingApi = useRouteMatchingApi ?? false
-        update()
+        let newValue = useRouteMatchingApi ?? false
+        if isRedundant(newValue == isUsingRouteMatchingApi) { return }
+        isUsingRouteMatchingApi = newValue
+        update("setIsUsingRouteMatchingApi")
     }
 
     func setWaypointIndices(waypointIndices: Array<Int>?){
+        if isRedundant(waypointIndices == currentWaypointIndices) { return }
         currentWaypointIndices = waypointIndices
-        update()
+        update("setWaypointIndices")
     }
 
     func setRouteProfile(profile: String?){
+        if isRedundant(profile == currentRouteProfile) { return }
         currentRouteProfile = profile
-        update()
+        update("setRouteProfile")
     }
 
     func setRouteExcludeList(excludeList: Array<String>?){
+        if isRedundant(excludeList == currentRouteExcludeList) { return }
         currentRouteExcludeList = excludeList
-        update()
+        update("setRouteExcludeList")
     }
 
     func setMapStyle(style: String?){
+        if isRedundant(style == currentMapStyle) { return }
         currentMapStyle = style
-        update()
+        update("setMapStyle")
     }
 
     func setCustomRasterSourceUrl(url: String?){
+        if isRedundant(url == currentCustomRasterSourceUrl) { return }
         currentCustomRasterSourceUrl = url
-        update()
+        update("setCustomRasterSourceUrl")
     }
 
     func setPlaceCustomRasterLayerAbove(layerId: String?){
+        if isRedundant(layerId == currentPlaceCustomRasterLayerAbove) { return }
         currentPlaceCustomRasterLayerAbove = layerId
-        update()
+        update("setPlaceCustomRasterLayerAbove")
     }
 
     func setDisableAlternativeRoutes(disableAlternativeRoutes: Bool?){
+        if isRedundant(disableAlternativeRoutes == currentDisableAlternativeRoutes) { return }
         currentDisableAlternativeRoutes = disableAlternativeRoutes
-        update()
+        update("setDisableAlternativeRoutes")
     }
 
     func recenterMap(){
@@ -645,7 +689,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         }
     }
 
-    func update(){
+    func update(_ reason: String = "unspecified"){
         // React/Expo applies every prop through its own setter, and each setter calls
         // update(). On mount and on every re-render that is ~15 update() calls within a
         // single runloop tick. Recalculating a route on each one previously cancelled the
@@ -656,6 +700,10 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // request by deferring the work to the end of the current runloop tick, by which
         // point every prop in this render has been applied.
         if updateScheduled { return }
+        // One line per genuine route recalculation, naming what triggered it. With the guards above
+        // this is rare, so a burst of these means a prop is churning its value and the skin is
+        // rebuilding underneath the driver.
+        NSLog("[TBTUpdate] route recalculation scheduled by \(reason)")
         updateScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
