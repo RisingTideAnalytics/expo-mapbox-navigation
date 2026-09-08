@@ -660,33 +660,47 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     func setInitialLocation(location: CLLocationCoordinate2D, zoom: Double?){
-        initialLocation = location
         // Validate zoom value to prevent NaN errors
-        if let zoom = zoom, !zoom.isNaN && !zoom.isInfinite && zoom > 0 {
-            initialLocationZoom = zoom
-        } else {
-            initialLocationZoom = 15 // Default zoom
+        let newZoom: Double = (zoom.map { !$0.isNaN && !$0.isInfinite && $0 > 0 } ?? false) ? zoom! : 15
+        // This setter schedules no update, but it writes the camera *directly* — and React
+        // re-applies it on every render. Re-setting the camera mid-flight cancels NavigationCamera's
+        // animation into .following: the map visibly stops zooming toward the driver, the camera
+        // never latches .following, and the MOB-414 compass then stays hidden forever because
+        // hasEnteredFollowingCamera is still false. Skipping the whole rebuild is what exposed this;
+        // before, the route recalculation recreated the camera a moment later and hid the damage.
+        //
+        // The navigationMapView != nil clause plays the same role as in isRedundant: while there is
+        // no map the write never happened, so a later re-application still has to perform it.
+        if let current = initialLocation,
+           current.latitude == location.latitude,
+           current.longitude == location.longitude,
+           initialLocationZoom == newZoom,
+           navigationViewController?.navigationMapView != nil {
+            return
         }
-        let navigationMapView = navigationViewController?.navigationMapView
-        if(initialLocation != nil && navigationMapView != nil){
-            let validZoom = initialLocationZoom ?? 15
-            navigationMapView!.mapView.mapboxMap.setCamera(to: CameraOptions(center: initialLocation!, zoom: validZoom))
+        initialLocation = location
+        initialLocationZoom = newZoom
+        if let navigationMapView = navigationViewController?.navigationMapView {
+            navigationMapView.mapView.mapboxMap.setCamera(to: CameraOptions(center: location, zoom: newZoom))
         }
     }
 
     func setFollowingZoom(followingZoom: Double?){
-        let navigationMapView = navigationViewController?.navigationMapView
         // Validate zoom value to prevent NaN errors
-        if let zoom = followingZoom, !zoom.isNaN && !zoom.isInfinite && zoom > 0 {
-            currentFollowingZoom = zoom
-            if(navigationMapView != nil){
-                let newDataSource = MobileViewportDataSource(navigationMapView!.mapView)
-                newDataSource.options.followingCameraOptions.zoomRange = zoom...zoom
-                navigationMapView?.navigationCamera.viewportDataSource = newDataSource
-            }
-        } else {
-            currentFollowingZoom = nil
+        let newZoom: Double? = (followingZoom.map { !$0.isNaN && !$0.isInfinite && $0 > 0 } ?? false)
+            ? followingZoom
+            : nil
+        // Same reasoning as setInitialLocation: installing a fresh MobileViewportDataSource replaces
+        // the camera's viewport, so repeating it on every render would fight the live transition.
+        if newZoom == currentFollowingZoom, navigationViewController?.navigationMapView != nil {
+            return
         }
+        currentFollowingZoom = newZoom
+        guard let zoom = newZoom,
+              let navigationMapView = navigationViewController?.navigationMapView else { return }
+        let newDataSource = MobileViewportDataSource(navigationMapView.mapView)
+        newDataSource.options.followingCameraOptions.zoomRange = zoom...zoom
+        navigationMapView.navigationCamera.viewportDataSource = newDataSource
     }
 
     func update(_ reason: String = "unspecified"){
