@@ -167,6 +167,15 @@ class ExpoMapboxNavigationViewController: UIViewController {
     // keeps the button from flashing on every route load and reroute.
     private var hasEnteredFollowingCamera: Bool = false
 
+    // The drop-in UI's own mute button, resolved by findMuteButton at setup. weak because it belongs
+    // to the per-leg NavigationViewController; we hold it only to keep isSelected in step with the
+    // real muted state and to drop our target on teardown.
+    private weak var muteButton: UIButton? = nil
+    // The last muted value this controller either applied from the `mute` prop or reported to JS,
+    // mirroring Android's `isMuted` field (android/.../ExpoMapboxNavigationView.kt:124). nil until
+    // the first observation so the progress watchdog can adopt a baseline without emitting.
+    private var lastReportedMuted: Bool? = nil
+
     var currentUIStyle: String? = nil
 
     init() {
@@ -287,6 +296,10 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // button can outlive us. Captured like navVC because deinit is nonisolated.
         let button = recenterButton
         recenterButton = nil
+        // Synchronously, unlike recenterButton below: removeTarget needs `self`, which an escaping
+        // closure in a deinit cannot capture. It is a cheap UIKit call and every release path here
+        // runs on main (the RN view unmounts on main), so doing it inline is both simpler and safe.
+        teardownMuteButton()
         if ExpoMapboxNavigationViewController.activeController === self {
             ExpoMapboxNavigationViewController.activeController = nil
         }
@@ -376,6 +389,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // bumped generation makes the awaited result and any queued delayed setup fail their guards.
         routeRequestGeneration += 1
         teardownRecenterButton()
+        teardownMuteButton()
         if let navVC = navigationViewController {
             navVC.delegate = nil
             navVC.willMove(toParent: nil)
@@ -556,9 +570,27 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     func setIsMuted(isMuted: Bool?){
-        if(isMuted != nil){
-            ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted = isMuted!
-        }
+        guard let isMuted = isMuted else { return }
+        applyMuted(isMuted)
+    }
+
+    /// The single entry point for the muted state, like Android's applyMuteState
+    /// (android/.../ExpoMapboxNavigationView.kt:1086). Keeps the three things that can drift apart in
+    /// step: the shared synthesizer that actually speaks, the SDK button's isSelected (which its own
+    /// toggleMute: reads and inverts, and which drives its selectedImage), and the baseline the
+    /// progress watchdog compares against. Main-thread by construction: Expo prop setters run there
+    /// and sharedVoiceController is @MainActor.
+    private func applyMuted(_ muted: Bool) {
+        ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted = muted
+        muteButton?.isSelected = muted
+        lastReportedMuted = muted
+    }
+
+    /// Every onMuteChange goes through here, so an emit can never leave lastReportedMuted behind.
+    /// Stamped before the dispatch, which is what keeps the watchdog from re-reporting its own event.
+    private func emitMuteChange(_ muted: Bool, source: String) {
+        lastReportedMuted = muted
+        onMuteChange?(["isMuted": muted, "source": source])
     }
 
     func setInitialLocation(location: CLLocationCoordinate2D, zoom: Double?){
@@ -707,11 +739,25 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     @objc func muteButtonTapped(_ sender: AnyObject?) {
-        // toggleMute: is async; read the settled selected state shortly after and report it.
         guard let button = sender as? UIButton else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self, weak button] in
+        // OrnamentsController.toggleMute(_:) does `sender.isSelected = !sender.isSelected`
+        // SYNCHRONOUSLY — isSelected / setSelected: / isSelected msgSends at the top of the method —
+        // and defers only the speechSynthesizer.muted write to a @MainActor Task. So the settled
+        // value is already on the button and there is nothing to wait 0.35s for; that delay was
+        // guessing at the Task hop, and it reported a stale value on a double tap.
+        //
+        // One main-queue turn rather than zero because UIKit does not document the order in which it
+        // invokes a control's targets, so this reads correctly whether the SDK's registration fires
+        // before or after ours.
+        DispatchQueue.main.async { [weak self, weak button] in
             guard let self = self, let button = button, self.isActive else { return }
-            self.onMuteChange?(["isMuted": button.isSelected, "source": "tap"])
+            let muted = button.isSelected
+            NSLog("[AudibleDirections] mute tap -> isMuted=\(muted)")
+            // Idempotent with the SDK's own deferred write of the same value, but it keeps audio
+            // correct if a future SDK stops routing toggleMute: through the voice controller we hand
+            // it in NavigationOptions. Also stamps the baseline ahead of the emit.
+            self.applyMuted(muted)
+            self.emitMuteChange(muted, source: "tap")
         }
     }
 
@@ -774,6 +820,19 @@ class ExpoMapboxNavigationViewController: UIViewController {
         observeCameraState(navVC)
     }
 
+    // Wires the drop-in UI's own mute button: syncs its isSelected to the real muted state and
+    // observes taps. Kept separate from the emit so the wiring can run synchronously at setup.
+    @MainActor
+    private func installMuteButton(in navVC: NavigationViewController) {
+        guard let button = findMuteButton(in: navVC) else { return }
+        muteButton = button
+        // toggleMute: inverts the *current* isSelected, and the button carries a distinct
+        // selectedImage. So a persisted mute=true against an unselected button showed the unmuted
+        // icon and made the driver's first tap an audible no-op. This line is that half of MOB-415.
+        button.isSelected = ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted
+        button.addTarget(self, action: #selector(muteButtonTapped(_:)), for: .touchUpInside)
+    }
+
     @MainActor
     private func observeCameraState(_ navVC: NavigationViewController) {
         cameraStateCancellable?.cancel()
@@ -816,6 +875,14 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // ever outlived this controller. Cheap enough to do unconditionally.
         recenterButton?.removeTarget(nil, action: nil, for: .allEvents)
         recenterButton = nil
+    }
+
+    private func teardownMuteButton() {
+        // removeTarget(self, ...) — NOT nil. Unlike recenterButton this button is the SDK's and still
+        // carries OrnamentsController's toggleMute: registration; nil means "every target" and would
+        // rip out the SDK's own mute handling, reproducing MOB-415 from the other direction.
+        muteButton?.removeTarget(self, action: nil, for: .allEvents)
+        muteButton = nil
     }
 
     // MARK: - Mute button discovery
@@ -1134,6 +1201,12 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // the floatingButtons accessor calls loadViewIfNeeded() itself), and doing it here avoids
         // the deferred-block hazard where a teardownForHandoff() lands first.
         installRecenterButton(in: navigationViewController)
+        // Same reasoning, plus: the mute button and its toggleMute: target are created in
+        // OrnamentsController.navigationViewDidLoad(_:), i.e. during the loadViewIfNeeded() the line
+        // above already forced, so the lazy storage Mirror reads is populated by now and the lookup
+        // does not need deferring. The deferred block below retries once in case a future SDK builds
+        // it later (viewWillAppear, say).
+        installMuteButton(in: navigationViewController)
 
         navigationViewController.delegate = self
         addChild(navigationViewController)
@@ -1157,19 +1230,19 @@ class ExpoMapboxNavigationViewController: UIViewController {
             mapboxNavigation!.tripSession().startActiveGuidance(with: navigationRoutes, startLegIndex: 0)
         }
 
-        // After layout, sync the native mute button to the current mute state (its toggleMute:
-        // action keys off isSelected) and observe taps to persist the value back to RN.
+        // Deferred only for the two things that need it: the event, so JS has its handlers attached
+        // by the time it lands, and a one-shot retry of the lookup. The wiring itself already ran
+        // synchronously above.
         DispatchQueue.main.async { [weak self, weak navigationViewController] in
             guard let self = self, let navVC = navigationViewController, self.isActive else { return }
+            if self.muteButton == nil { self.installMuteButton(in: navVC) }
             let muted = ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted
-            guard let muteButton = self.findMuteButton(in: navVC) else {
-                NSLog("[AudibleDirections] mute button NOT found")
-                self.onMuteChange?(["isMuted": muted, "source": "setup-notfound"])
+            guard self.muteButton != nil else {
+                self.logMuteButtonLookupFailure(navVC)
+                self.emitMuteChange(muted, source: "setup-notfound")
                 return
             }
-            muteButton.isSelected = muted
-            muteButton.addTarget(self, action: #selector(self.muteButtonTapped(_:)), for: .touchUpInside)
-            self.onMuteChange?(["isMuted": muted, "source": "setup"])
+            self.emitMuteChange(muted, source: "setup")
         }
     }
 }
