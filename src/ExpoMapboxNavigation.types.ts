@@ -166,7 +166,15 @@ export type ExpoMapboxNavigationViewProps = {
   onRouteFailedToLoad?: (event: {
     nativeEvent: { errorMessage: string };
   }) => void;
-  /** Fired when the user toggles the in-skin mute button, with the new muted state. */
+  /**
+   * Fired when the muted state changes, with the new value.
+   *
+   * `source` is iOS-only and says where the value came from: `"tap"` (the in-skin mute button),
+   * `"setup"` (echoed back on view setup), `"observed"` (the watchdog saw the shared speech
+   * synthesizer change without a tap being reported — the button lookup is degraded but the state
+   * is still correct), or `"setup-notfound"` (the in-skin button could not be located; taps arrive
+   * via `"observed"` about a second late and its icon may be stale).
+   */
   onMuteChange?: (event: { nativeEvent: { isMuted: boolean; source?: string } }) => void;
   style?: StyleProp<ViewStyle>;
   uiStyle?: "day" | "night";
