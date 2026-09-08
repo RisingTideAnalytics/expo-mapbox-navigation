@@ -685,6 +685,23 @@ class ExpoMapboxNavigationViewController: UIViewController {
         }
     }
 
+    /// Installs the configured following-camera zoom on a map.
+    ///
+    /// Shared by the prop setter and by controller setup, and setup is the load-bearing caller:
+    /// every rebuild constructs a fresh NavigationMapView with a default viewport data source, so a
+    /// zoom applied to the previous map does not carry over. Before the unchanged-value guards, the
+    /// next re-render happened to re-install it; now that those re-applications are skipped, setup
+    /// has to do it — the same reason initialLocation is re-applied there.
+    private func applyFollowingZoom(to navigationMapView: NavigationMapView) {
+        // nil means "no override"; the SDK's default viewport data source is already in place, and
+        // clearing the prop mid-session leaves it rather than reinstating a default, which matches
+        // the behaviour this had before the guards.
+        guard let zoom = currentFollowingZoom else { return }
+        let newDataSource = MobileViewportDataSource(navigationMapView.mapView)
+        newDataSource.options.followingCameraOptions.zoomRange = zoom...zoom
+        navigationMapView.navigationCamera.viewportDataSource = newDataSource
+    }
+
     func setFollowingZoom(followingZoom: Double?){
         // Validate zoom value to prevent NaN errors
         let newZoom: Double? = (followingZoom.map { !$0.isNaN && !$0.isInfinite && $0 > 0 } ?? false)
@@ -692,15 +709,13 @@ class ExpoMapboxNavigationViewController: UIViewController {
             : nil
         // Same reasoning as setInitialLocation: installing a fresh MobileViewportDataSource replaces
         // the camera's viewport, so repeating it on every render would fight the live transition.
+        // Safe to skip only because setup re-applies the stored value to each new map.
         if newZoom == currentFollowingZoom, navigationViewController?.navigationMapView != nil {
             return
         }
         currentFollowingZoom = newZoom
-        guard let zoom = newZoom,
-              let navigationMapView = navigationViewController?.navigationMapView else { return }
-        let newDataSource = MobileViewportDataSource(navigationMapView.mapView)
-        newDataSource.options.followingCameraOptions.zoomRange = zoom...zoom
-        navigationMapView.navigationCamera.viewportDataSource = newDataSource
+        guard let navigationMapView = navigationViewController?.navigationMapView else { return }
+        applyFollowingZoom(to: navigationMapView)
     }
 
     func update(_ reason: String = "unspecified"){
@@ -1262,6 +1277,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
             }
             navigationMapView!.mapView.mapboxMap.setCamera(to: CameraOptions(center: initialLocation!, zoom: validZoom))
         }
+
+        // Re-applied per rebuild, like initialLocation above: this map is new and carries the SDK's
+        // default viewport data source, and setFollowingZoom now skips unchanged re-applications, so
+        // nothing else would ever install it.
+        applyFollowingZoom(to: navigationMapView!)
 
         let style = currentMapStyle != nil ? StyleURI(rawValue: currentMapStyle!) : StyleURI.streets
         navigationMapView!.mapView.mapboxMap.loadStyle(style!, completion: { _ in
