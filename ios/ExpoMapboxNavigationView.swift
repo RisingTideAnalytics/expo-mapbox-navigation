@@ -213,12 +213,34 @@ class ExpoMapboxNavigationViewController: UIViewController {
                     value: "#FFFFFF"
                 )
 
+               let muted = ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted
+
+               // Watchdog, independent of ever locating the SDK's mute button. toggleMute: writes
+               // straight to the synthesizer we hand the SDK in NavigationOptions, so a value that
+               // diverges from the last one we applied or reported means a mute happened that JS was
+               // never told about. That is exactly what MOB-415 was, and this is what keeps the next
+               // SDK bump to a one-tick delay instead of another silent regression.
+               //
+               // It cannot loop: emitMuteChange stamps lastReportedMuted before dispatching, so the
+               // next tick sees no divergence; the resulting `mute` prop write lands in applyMuted
+               // with the same value and re-stamps the same baseline; and the app-side guard
+               // `if (isMuted === navVoiceMuted) return` drops the echo regardless.
+               if self.lastReportedMuted == nil {
+                   // First observation for this controller — adopt it silently rather than duplicate
+                   // the "setup" event.
+                   self.lastReportedMuted = muted
+               } else if self.lastReportedMuted != muted {
+                   NSLog("[AudibleDirections] observed mute divergence \(self.lastReportedMuted!) -> \(muted)")
+                   self.muteButton?.isSelected = muted
+                   self.emitMuteChange(muted, source: "observed")
+               }
+
                self.onRouteProgressChanged?([
                     "distanceRemaining": progressState!.routeProgress.distanceRemaining,
                     "distanceTraveled": progressState!.routeProgress.distanceTraveled,
                     "durationRemaining": progressState!.routeProgress.durationRemaining,
                     "fractionTraveled": progressState!.routeProgress.fractionTraveled,
-                    "isMuted": ExpoMapboxNavigationViewController.sharedVoiceController.speechSynthesizer.muted,
+                    "isMuted": muted,
                 ])
             }
         }
