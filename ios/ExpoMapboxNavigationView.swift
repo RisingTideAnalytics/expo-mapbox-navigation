@@ -818,63 +818,179 @@ class ExpoMapboxNavigationViewController: UIViewController {
         recenterButton = nil
     }
 
+    // MARK: - Mute button discovery
+    //
+    // The drop-in UI's mute button is `NavigationViewController.muteButton`, an *internal*
+    // `lazy var muteButton: FloatingButton`. It appears in neither the public nor the private
+    // .swiftinterface, and its getter and method descriptor are file-local symbols, so there is no
+    // compile-time and no dlsym route to it. Everything below is reflective by necessity.
+    //
+    // Verified against the vendored MapboxNavigationUIKit 3.8 arm64 binary:
+    //  * Field descriptor _$s21MapboxNavigationUIKit0B14ViewControllerCMF lists 28 fields; #8 is
+    //    `$__lazy_storage_$_muteButton: Optional<FloatingButton>`, and that name lives in
+    //    __swift5_reflstr — i.e. Swift reflection metadata is present and Mirror can see it.
+    //    MapboxNavigationUIKit is a *dynamic* framework (s.static_framework applies to our pod, not
+    //    to the vendored xcframeworks), so app-link dead-stripping cannot remove those sections.
+    //  * The same name exists as an Objective-C ivar, but every ivar on that class points its type
+    //    encoding at the empty string: Swift-native (non-@objc) stored properties emit no encoding.
+    //    That is why the previous ivar_getTypeEncoding hasPrefix("@") gate could never fire and this
+    //    always fell through to "setup-notfound" (MOB-415). Relaxing the gate is not the fix — an
+    //    empty encoding says nothing about object-vs-value, so object_getIvar could hand a
+    //    bit-packed Bool to a dynamic cast. Mirror reaches the same storage type-safely.
+    //  * The buttons carry no accessibilityLabel. The SDK's only MUTE/UNMUTE strings are
+    //    CARPLAY_MUTE / CARPLAY_UNMUTE, consumed by CarPlayManager's CPBarButton.
+    //  * The tap action is -[OrnamentsController toggleMute:], registered for .touchUpInside
+    //    (w4 = 0x40) in OrnamentsController.navigationViewDidLoad(_:) — which is what layer 2 keys
+    //    off, and which also proves the button exists from viewDidLoad onward.
+
+    /// Labels the Mirror walk is allowed to descend into. An allow-list, not a blind deep walk:
+    /// reflecting the whole view-controller graph would wander into the view hierarchy and every
+    /// Combine subscription the SDK holds. OrnamentsController has no button of its own today (its
+    /// four fields are navigationViewData/eventsManager/subscriptions/showsSpeedLimits) — this is
+    /// purely so a future SDK that moves the button there still resolves.
+    private static let muteBridgeLabels = ["ornamentsController", "navigationViewData", "navigationView"]
+
     private func findMuteButton(in navVC: NavigationViewController) -> UIButton? {
-        // Primary: reflection. The mute button is a private lazy `muteButton: FloatingButton` on the
-        // nav VC (or its OrnamentsController). object_getIvar is only called on name-matched ivars
-        // (object types), so it is safe and avoids the `allTargets` Set-bridge crash.
-        if let b = findMuteButtonReflectively(navVC) {
-            NSLog("[AudibleDirections] mute button via reflection")
+        if let b = muteButtonViaMirror(navVC) {
+            NSLog("[AudibleDirections] mute button via mirror class=\(String(describing: type(of: b)))")
             return b
         }
-        // Fallback: accessibilityLabel among the floating buttons.
+        if let b = muteButtonViaTargetAction(in: navVC) {
+            NSLog("[AudibleDirections] mute button via target-action class=\(String(describing: type(of: b)))")
+            return b
+        }
+        if let b = muteButtonViaAccessibilityLabel(in: navVC) {
+            NSLog("[AudibleDirections] mute button via accessibilityLabel=\(b.accessibilityLabel ?? "nil")")
+            return b
+        }
+        return nil
+    }
+
+    /// Depth-limited Mirror walk for a stored property whose name contains "muteButton".
+    /// Mirror.children is lazily computed for classes, so a hit at field #8 never materializes the
+    /// remaining 19 fields of NavigationViewController.
+    private func muteButtonViaMirror(_ root: Any, depth: Int = 0) -> UIButton? {
+        guard depth <= 2 else { return nil }
+        var bridges: [Any] = []
+        var mirror: Mirror? = Mirror(reflecting: root)
+        while let m = mirror {
+            for child in m.children {
+                guard let label = child.label else { continue }
+                if label.contains("muteButton"), let button = unwrapButton(child.value) {
+                    return button
+                }
+                if ExpoMapboxNavigationViewController.muteBridgeLabels.contains(where: { label.contains($0) }) {
+                    bridges.append(child.value)
+                }
+            }
+            // NavigationViewController's superclass is UIViewController, which reflects with zero
+            // children, so this terminates immediately today. Walked anyway in case the SDK ever
+            // inserts a Swift intermediate class.
+            mirror = m.superclassMirror
+        }
+        for bridge in bridges {
+            if let button = muteButtonViaMirror(unwrapOptional(bridge), depth: depth + 1) { return button }
+        }
+        return nil
+    }
+
+    /// Mirror hands back the *storage*, so `lazy var muteButton: FloatingButton` arrives as an `Any`
+    /// boxing `Optional<FloatingButton>`. A conditional cast out of `Any` already unwraps one level
+    /// of Optional, so the first line normally suffices; the Mirror unwrap is insurance for a future
+    /// SDK declaring the storage `weak`, which reflects as a further-nested optional.
+    /// CarPlayNavigationViewController has a same-named field typed CPBarButton; the cast rejects it.
+    private func unwrapButton(_ value: Any) -> UIButton? {
+        if let b = value as? UIButton { return b }
+        let m = Mirror(reflecting: value)
+        guard m.displayStyle == .optional, let inner = m.children.first?.value else { return nil }
+        return inner as? UIButton
+    }
+
+    /// Unwraps one level of Optional, or returns the value unchanged. Deliberately not `as? AnyObject`:
+    /// on Darwin that succeeds for anything by boxing, including Optional.none, which would send the
+    /// walk chasing an empty _SwiftValue box.
+    private func unwrapOptional(_ value: Any) -> Any {
+        let m = Mirror(reflecting: value)
+        guard m.displayStyle == .optional else { return value }
+        return m.children.first?.value ?? value
+    }
+
+    /// Identifies the button by behaviour rather than by storage, which is the more durable of the
+    /// two: a selector name survives SDK refactors that rename or relocate a stored property.
+    private func muteButtonViaTargetAction(in navVC: NavigationViewController) -> UIButton? {
+        for button in floatingCandidates(in: navVC) {
+            // Ours has no mute action, but skipping it keeps the failure dump honest.
+            if button === recenterButton { continue }
+            for target in targets(of: button) {
+                for event: UIControl.Event in [.touchUpInside, .primaryActionTriggered] {
+                    // NSArray<NSString *> -> [String]?, a plain array bridge with no hashing.
+                    // Always an explicit target, never nil: nil-means-all is documented for
+                    // removeTarget:, not for actionsForTarget:, which matches only nil-target
+                    // registrations.
+                    let actions = button.actions(forTarget: target, forControlEvent: event) ?? []
+                    if actions.contains(where: { $0.lowercased().contains("mute") }) { return button }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// `UIControl.allTargets` is typed `Set<AnyHashable>` in Swift; materializing it forces an
+    /// AnyHashable box and a Hashable conformance lookup per target, which is what crashed here
+    /// before. Invoke the Objective-C selector and stay in NSSet, which enumerates without hashing.
+    /// `allTargets` is public API — only the dispatch is dynamic.
+    private func targets(of control: UIControl) -> [AnyObject] {
+        let sel = Selector(("allTargets"))
+        guard control.responds(to: sel), let unmanaged = control.perform(sel) else { return [] }
+        // Not an alloc/new/copy/mutableCopy-family selector, so the NSSet comes back autoreleased and
+        // takeUnretainedValue is correct; the `as? NSSet` binding retains it for our scope.
+        guard let set = unmanaged.takeUnretainedValue() as? NSSet else { return [] }
+        var out: [AnyObject] = []
+        for element in set {
+            // allTargets can hold NSNull standing in for a nil target.
+            if element is NSNull { continue }
+            out.append(element as AnyObject)
+        }
+        return out
+    }
+
+    /// Third layer. Dead for the phone skin on SDK 3.8 (see the note above), but it costs nothing and
+    /// would start working the day Mapbox labels these buttons.
+    private func muteButtonViaAccessibilityLabel(in navVC: NavigationViewController) -> UIButton? {
+        let muteLabels: Set<String> = ["mute", "unmute"]
+        return floatingCandidates(in: navVC).first {
+            guard let label = $0.accessibilityLabel?.lowercased() else { return false }
+            return muteLabels.contains(label)
+        }
+    }
+
+    private func floatingCandidates(in navVC: NavigationViewController) -> [UIButton] {
         var candidates: [UIButton] = navVC.navigationView.floatingStackView.arrangedSubviews
             .compactMap { $0 as? UIButton }
         if let fb = navVC.navigationView.floatingButtons {
             for b in fb where !candidates.contains(where: { $0 === b }) { candidates.append(b) }
         }
-        NSLog("[AudibleDirections] reflection miss; candidates=\(candidates.count)")
-        let muteLabels: Set<String> = ["mute", "unmute"]
-        for b in candidates {
-            if let label = b.accessibilityLabel?.lowercased(), muteLabels.contains(label) {
-                NSLog("[AudibleDirections] mute button via label=\(label)")
-                return b
-            }
-        }
-        for (i, b) in candidates.enumerated() {
-            NSLog("[AudibleDirections] btn[\(i)] class=\(String(describing: type(of: b))) label=\(b.accessibilityLabel ?? "nil")")
-        }
-        return nil
+        return candidates
     }
 
-    private func findMuteButtonReflectively(_ obj: AnyObject) -> UIButton? {
-        if let b = ivarValue(of: obj, nameContains: "muteButton") as? UIButton { return b }
-        if let ornaments = ivarValue(of: obj, nameContains: "rnament") {
-            if let b = ivarValue(of: ornaments, nameContains: "muteButton") as? UIButton { return b }
+    /// Emitted once per leg, and only when every layer missed. This is what makes the next SDK bump
+    /// diagnosable from a device log instead of from otool on the vendored binary: the child labels
+    /// name the new storage, and the action lists name the new selector.
+    private func logMuteButtonLookupFailure(_ navVC: NavigationViewController) {
+        NSLog("[AudibleDirections] mute button NOT found — SDK layout changed?")
+        var labels: [String] = []
+        var mirror: Mirror? = Mirror(reflecting: navVC)
+        while let m = mirror {
+            labels.append(contentsOf: m.children.compactMap { $0.label })
+            mirror = m.superclassMirror
         }
-        return nil
-    }
-
-    private func ivarValue(of obj: AnyObject, nameContains needle: String) -> AnyObject? {
-        var cls: AnyClass? = object_getClass(obj)
-        while let c = cls {
-            var count: UInt32 = 0
-            if let list = class_copyIvarList(c, &count) {
-                defer { free(list) }
-                for i in 0..<Int(count) {
-                    guard let cName = ivar_getName(list[i]),
-                          let name = String(validatingUTF8: cName) else { continue }
-                    // Only read object-typed ivars (encoding "@...") so object_getIvar never
-                    // misinterprets a value-type ivar (which could crash).
-                    if name.contains(needle),
-                       let encC = ivar_getTypeEncoding(list[i]),
-                       let enc = String(validatingUTF8: encC), enc.hasPrefix("@") {
-                        return object_getIvar(obj, list[i]) as AnyObject?
-                    }
-                }
-            }
-            cls = class_getSuperclass(c)
+        NSLog("[AudibleDirections] navVC mirror children (\(labels.count)): \(labels.joined(separator: ","))")
+        for (i, b) in floatingCandidates(in: navVC).enumerated() {
+            let actions = targets(of: b)
+                .flatMap { b.actions(forTarget: $0, forControlEvent: .touchUpInside) ?? [] }
+                .joined(separator: "|")
+            NSLog("[AudibleDirections] btn[\(i)] class=\(String(describing: type(of: b))) a11y=\(b.accessibilityLabel ?? "nil") actions=[\(actions)]")
         }
-        return nil
     }
 
     func convertRoute(route: Route) -> Any {
