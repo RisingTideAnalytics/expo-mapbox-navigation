@@ -103,6 +103,9 @@ import java.util.Locale
 
 val PIXEL_DENSITY = Resources.getSystem().displayMetrics.density
 
+// Most of the view's width the landscape camera padding's left inset may take (see landscapeLeftInset).
+const val LANDSCAPE_LEFT_INSET_MAX_SHARE = 0.35
+
 // Opaque, non-white backdrops painted under the map so its style-load gap reads dark/light, not white.
 private val BACKDROP_DARK = Color.rgb(31, 31, 33)
 private val BACKDROP_LIGHT = Color.rgb(230, 230, 232)
@@ -838,46 +841,69 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     }
 
     private fun createViewportDataSource(mapboxMap: MapboxMap): MapboxNavigationViewportDataSource {
-        val portraitOverviewPadding =
-                EdgeInsets(
-                        140.0 * PIXEL_DENSITY,
-                        40.0 * PIXEL_DENSITY,
-                        120.0 * PIXEL_DENSITY,
-                        40.0 * PIXEL_DENSITY
-                )
-        val landscapeOverviewPadding =
+        return MapboxNavigationViewportDataSource(mapboxMap).apply {
+            options.followingFrameOptions.focalPoint = FocalPoint(0.5, 0.9)
+            // No size yet at construction: start from the device orientation, then onSizeChanged
+            // re-picks the padding from the view's actual frame.
+            val landscape =
+                    context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+            followingPadding = followingPaddingFor(landscape, null)
+            overviewPadding = overviewPaddingFor(landscape, null)
+        }
+    }
+
+    // The landscape paddings reserve a wide left inset, sized for a full-screen landscape map. The
+    // view can be laid out in only part of the screen (e.g. the right pane of a tablet split layout),
+    // so the inset is capped to a share of the view's own width — otherwise a near-square pane would
+    // push the puck almost off its right edge.
+    private fun landscapeLeftInset(viewWidthPx: Int?): Double {
+        val full = 380.0 * PIXEL_DENSITY
+        return if (viewWidthPx == null) full else minOf(full, viewWidthPx * LANDSCAPE_LEFT_INSET_MAX_SHARE)
+    }
+
+    private fun followingPaddingFor(landscape: Boolean, viewWidthPx: Int?): EdgeInsets =
+            if (landscape) {
                 EdgeInsets(
                         30.0 * PIXEL_DENSITY,
-                        380.0 * PIXEL_DENSITY,
+                        landscapeLeftInset(viewWidthPx),
                         110.0 * PIXEL_DENSITY,
-                        20.0 * PIXEL_DENSITY
+                        40.0 * PIXEL_DENSITY
                 )
-        val portraitFollowingPadding =
+            } else {
                 EdgeInsets(
                         180.0 * PIXEL_DENSITY,
                         40.0 * PIXEL_DENSITY,
                         150.0 * PIXEL_DENSITY,
                         40.0 * PIXEL_DENSITY
                 )
-        val landscapeFollowingPadding =
+            }
+
+    private fun overviewPaddingFor(landscape: Boolean, viewWidthPx: Int?): EdgeInsets =
+            if (landscape) {
                 EdgeInsets(
                         30.0 * PIXEL_DENSITY,
-                        380.0 * PIXEL_DENSITY,
+                        landscapeLeftInset(viewWidthPx),
                         110.0 * PIXEL_DENSITY,
+                        20.0 * PIXEL_DENSITY
+                )
+            } else {
+                EdgeInsets(
+                        140.0 * PIXEL_DENSITY,
+                        40.0 * PIXEL_DENSITY,
+                        120.0 * PIXEL_DENSITY,
                         40.0 * PIXEL_DENSITY
                 )
-
-        return MapboxNavigationViewportDataSource(mapboxMap).apply {
-            options.followingFrameOptions.focalPoint = FocalPoint(0.5, 0.9)
-            if (context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
-            ) {
-                followingPadding = landscapeFollowingPadding
-                overviewPadding = landscapeOverviewPadding
-            } else {
-                followingPadding = portraitFollowingPadding
-                overviewPadding = portraitOverviewPadding
             }
-        }
+
+    // Pick the camera padding from this view's own frame, not the device orientation: the view need
+    // not fill the screen, and a resize (rotation, split / unsplit) must re-pick it without a remount.
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w <= 0 || h <= 0) return
+        val landscape = w > h
+        viewportDataSource.followingPadding = followingPaddingFor(landscape, w)
+        viewportDataSource.overviewPadding = overviewPaddingFor(landscape, w)
+        viewportDataSource.evaluate()
     }
 
     override fun onAttachedToWindow() {
