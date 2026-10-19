@@ -164,7 +164,10 @@ class ExpoMapboxNavigationViewController: UIViewController {
     private var cameraStateCancellable: AnyCancellable? = nil
     // The camera reports .idle from construction until guidance yields a first fix, so an .idle
     // seen before the first .following is startup, not a user pan. Latching .following is what
-    // keeps the button from flashing on every route load and reroute.
+    // keeps the button from flashing on every route load and reroute. Set either by a .following
+    // emission or when setup requests .following itself: the startup transition into .following is
+    // not delivered to cameraStates subscribers (MOB-398), so waiting for it left the latch false
+    // and the first pan hid the button instead of showing it.
     private var hasEnteredFollowingCamera: Bool = false
 
     // The drop-in UI's own mute button, resolved by findMuteButton at setup. weak because it belongs
@@ -878,8 +881,8 @@ class ExpoMapboxNavigationViewController: UIViewController {
         ) ?? UIImage(systemName: "location.fill")
         let button: FloatingButton = FloatingButton.rounded(image: symbol)
         button.accessibilityLabel = NSLocalizedString(
-            "RESUME",
-            value: "Resume",
+            "RECENTER",
+            value: "Recenter",
             comment: "Return the camera to following the user's location"
         )
         button.accessibilityIdentifier = "expo.mapbox.recenterButton"
@@ -1332,6 +1335,12 @@ class ExpoMapboxNavigationViewController: UIViewController {
             }
             ExpoMapboxNavigationViewController.activeController = self
             mapboxNavigation!.tripSession().startActiveGuidance(with: navigationRoutes, startLegIndex: 0)
+            // Request the following camera ourselves and latch it. On the simulator the camera did
+            // enter .following here, but cameraStates never emitted it, so an .idle from the first
+            // pan looked like startup and kept the button hidden (MOB-398). Requesting it makes the
+            // latch true by construction: from here on, .idle can only mean "not following".
+            recenterMap()
+            hasEnteredFollowingCamera = true
         }
 
         // Deferred only for the two things that need it: the event, so JS has its handlers attached
