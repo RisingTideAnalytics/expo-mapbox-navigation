@@ -878,8 +878,8 @@ class ExpoMapboxNavigationViewController: UIViewController {
         ) ?? UIImage(systemName: "location.fill")
         let button: FloatingButton = FloatingButton.rounded(image: symbol)
         button.accessibilityLabel = NSLocalizedString(
-            "RESUME",
-            value: "Resume",
+            "RECENTER",
+            value: "Recenter",
             comment: "Return the camera to following the user's location"
         )
         button.accessibilityIdentifier = "expo.mapbox.recenterButton"
