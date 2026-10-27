@@ -121,6 +121,11 @@ class ExpoMapboxNavigationViewController: UIViewController {
     var currentPlaceCustomRasterLayerAbove: String? = nil
     var currentDisableAlternativeRoutes: Bool? = nil
     var currentFollowingZoom: Double? = nil
+    // Height (pt) of a JS overlay covering the bottom of the map, e.g. a bottom sheet. 0 = none.
+    var currentCameraBottomInset: Double = 0
+    // The SDK's own bottom viewport padding on the current map, captured before the first override so
+    // dropping the inset back to 0 restores it. Reset per rebuild, since each rebuild is a new map.
+    private var sdkViewportPaddingBottom: CGFloat? = nil
     var isUsingRouteMatchingApi: Bool = false
     var vehicleMaxHeight: Double? = nil
     var vehicleMaxWidth: Double? = nil
@@ -439,6 +444,16 @@ class ExpoMapboxNavigationViewController: UIViewController {
         view.isOpaque = true
     }
 
+    // NavigationViewController may recompute the map's viewportPadding during its own layout, which
+    // would drop the bottom inset. applyCameraBottomInset only writes when the value differs, so
+    // re-checking on every layout pass costs nothing when the padding already holds.
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if let navigationMapView = navigationViewController?.navigationMapView {
+            applyCameraBottomInset(to: navigationMapView)
+        }
+    }
+
     // Never pure white, so the style-load gap is unobtrusive.
     private func backdropColor() -> UIColor {
         return currentUIStyle == "night"
@@ -719,6 +734,46 @@ class ExpoMapboxNavigationViewController: UIViewController {
         currentFollowingZoom = newZoom
         guard let navigationMapView = navigationViewController?.navigationMapView else { return }
         applyFollowingZoom(to: navigationMapView)
+    }
+
+    /// Raises the map's bottom viewport padding so the following / overview camera keeps the puck
+    /// above a JS overlay. Edits viewportPadding in place: installing a new viewport data source (as
+    /// applyFollowingZoom does) would cancel the move into .following and break the recenter latch
+    /// (MOB-398), so this must never do that.
+    private func applyCameraBottomInset(to navigationMapView: NavigationMapView) {
+        let current = navigationMapView.viewportPadding
+        if currentCameraBottomInset <= 0 && sdkViewportPaddingBottom == nil { return }
+        if sdkViewportPaddingBottom == nil { sdkViewportPaddingBottom = current.bottom }
+
+        let desiredBottom: CGFloat
+        if currentCameraBottomInset > 0 {
+            let wanted = CGFloat(currentCameraBottomInset) + Self.cameraBottomInsetMargin
+            // Keep a usable framed area however tall the overlay gets; before the first layout the
+            // height is 0 and there is nothing to clamp against yet.
+            let height = navigationMapView.bounds.height
+            let maxBottom = height > 0
+                ? max(0, height - current.top - Self.minFramedCameraHeight)
+                : wanted
+            desiredBottom = max(sdkViewportPaddingBottom ?? 0, min(wanted, maxBottom))
+        } else {
+            desiredBottom = sdkViewportPaddingBottom ?? current.bottom
+        }
+
+        if abs(current.bottom - desiredBottom) < 0.5 { return }
+        var padding = current
+        padding.bottom = desiredBottom
+        navigationMapView.viewportPadding = padding
+    }
+
+    private static let cameraBottomInsetMargin: CGFloat = 24
+    private static let minFramedCameraHeight: CGFloat = 120
+
+    func setCameraBottomInset(inset: Double?) {
+        let newInset = inset.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? 0
+        if newInset == currentCameraBottomInset { return }
+        currentCameraBottomInset = newInset
+        guard let navigationMapView = navigationViewController?.navigationMapView else { return }
+        applyCameraBottomInset(to: navigationMapView)
     }
 
     func update(_ reason: String = "unspecified"){
@@ -1285,6 +1340,10 @@ class ExpoMapboxNavigationViewController: UIViewController {
         // default viewport data source, and setFollowingZoom now skips unchanged re-applications, so
         // nothing else would ever install it.
         applyFollowingZoom(to: navigationMapView!)
+        // Same per-rebuild reasoning: the new map has the SDK's default padding, and the setter skips
+        // an unchanged inset. Its baseline is captured afresh from this map.
+        sdkViewportPaddingBottom = nil
+        applyCameraBottomInset(to: navigationMapView!)
 
         let style = currentMapStyle != nil ? StyleURI(rawValue: currentMapStyle!) : StyleURI.streets
         navigationMapView!.mapView.mapboxMap.loadStyle(style!, completion: { _ in

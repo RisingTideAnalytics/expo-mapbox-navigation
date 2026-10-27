@@ -171,6 +171,10 @@ public class ExpoMapboxNavigationModule: Module {
         view.controller.setFollowingZoom(followingZoom: followingZoom)
       }
 
+      Prop("cameraBottomInset") { (view: ExpoMapboxNavigationView, inset: Double?) in
+        view.controller.setCameraBottomInset(inset: inset)
+      }
+
       Prop("uiStyle") { (view: ExpoMapboxNavigationView, uiStyle: String?) in
         view.controller.setUIStyle(style: uiStyle)
       }
