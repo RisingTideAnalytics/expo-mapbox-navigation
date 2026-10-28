@@ -130,6 +130,13 @@ export type ExpoMapboxNavigationViewProps = {
   disableAlternativeRoutes?: boolean;
   followingZoom?: number;
   /**
+   * Height (points on iOS, dp on Android) of a custom overlay covering the bottom of the map, such
+   * as a bottom sheet. The following and overview cameras raise their bottom padding to keep the
+   * puck and route above it. Update it when the overlay settles at a new height, not on every frame.
+   * @default 0
+   */
+  cameraBottomInset?: number;
+  /**
    * Whether the navigation allows arriving on the opposite side of the street.
    * When true, the user can complete navigation even if they're on the opposite side of the destination.
    * Useful in urban areas where crossing the street might be difficult or unsafe.

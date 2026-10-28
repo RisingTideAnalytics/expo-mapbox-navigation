@@ -106,6 +106,12 @@ val PIXEL_DENSITY = Resources.getSystem().displayMetrics.density
 // Most of the view's width the landscape camera padding's left inset may take (see landscapeLeftInset).
 const val LANDSCAPE_LEFT_INSET_MAX_SHARE = 0.35
 
+// Gap (dp) kept between the puck and the top of a JS overlay reported through cameraBottomInset.
+const val CAMERA_BOTTOM_INSET_MARGIN = 24.0
+
+// Smallest height (dp) the padded camera area keeps, however tall the bottom inset gets.
+const val MIN_FRAMED_CAMERA_HEIGHT = 120.0
+
 // Opaque, non-white backdrops painted under the map so its style-load gap reads dark/light, not white.
 private val BACKDROP_DARK = Color.rgb(31, 31, 33)
 private val BACKDROP_LIGHT = Color.rgb(230, 230, 232)
@@ -180,6 +186,13 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     private val mapViewId = 1
     private val mapView = createMapView(mapViewId, parentConstraintLayout)
     private val mapboxMap = mapView.mapboxMap
+
+    // Height (dp) of a JS overlay covering the bottom of the map, e.g. a bottom sheet. Declared before
+    // viewportDataSource because createViewportDataSource reads it during construction.
+    private var cameraBottomInset = 0.0
+    // This view's last laid-out size, so a cameraBottomInset change can re-pick the padding without
+    // waiting for the next onSizeChanged.
+    private var viewSizePx: Pair<Int, Int>? = null
 
     private val viewportDataSource = createViewportDataSource(mapboxMap)
     private val navigationCamera =
@@ -861,36 +874,58 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         return if (viewWidthPx == null) full else minOf(full, viewWidthPx * LANDSCAPE_LEFT_INSET_MAX_SHARE)
     }
 
-    private fun followingPaddingFor(landscape: Boolean, viewWidthPx: Int?): EdgeInsets =
+    // The fixed bottom padding, raised to clear cameraBottomInset when that is taller, then capped so
+    // the padded area keeps MIN_FRAMED_CAMERA_HEIGHT inside the view.
+    private fun bottomPadding(baseDp: Double, topPx: Double, viewHeightPx: Int?): Double {
+        val wanted =
+                maxOf(baseDp, cameraBottomInset + CAMERA_BOTTOM_INSET_MARGIN) * PIXEL_DENSITY
+        if (viewHeightPx == null) return wanted
+        val max = viewHeightPx - topPx - MIN_FRAMED_CAMERA_HEIGHT * PIXEL_DENSITY
+        return maxOf(0.0, minOf(wanted, max))
+    }
+
+    private fun followingPaddingFor(
+            landscape: Boolean,
+            viewWidthPx: Int?,
+            viewHeightPx: Int? = null
+    ): EdgeInsets =
             if (landscape) {
+                val top = 30.0 * PIXEL_DENSITY
                 EdgeInsets(
-                        30.0 * PIXEL_DENSITY,
+                        top,
                         landscapeLeftInset(viewWidthPx),
-                        110.0 * PIXEL_DENSITY,
+                        bottomPadding(110.0, top, viewHeightPx),
                         40.0 * PIXEL_DENSITY
                 )
             } else {
+                val top = 180.0 * PIXEL_DENSITY
                 EdgeInsets(
-                        180.0 * PIXEL_DENSITY,
+                        top,
                         40.0 * PIXEL_DENSITY,
-                        150.0 * PIXEL_DENSITY,
+                        bottomPadding(150.0, top, viewHeightPx),
                         40.0 * PIXEL_DENSITY
                 )
             }
 
-    private fun overviewPaddingFor(landscape: Boolean, viewWidthPx: Int?): EdgeInsets =
+    private fun overviewPaddingFor(
+            landscape: Boolean,
+            viewWidthPx: Int?,
+            viewHeightPx: Int? = null
+    ): EdgeInsets =
             if (landscape) {
+                val top = 30.0 * PIXEL_DENSITY
                 EdgeInsets(
-                        30.0 * PIXEL_DENSITY,
+                        top,
                         landscapeLeftInset(viewWidthPx),
-                        110.0 * PIXEL_DENSITY,
+                        bottomPadding(110.0, top, viewHeightPx),
                         20.0 * PIXEL_DENSITY
                 )
             } else {
+                val top = 140.0 * PIXEL_DENSITY
                 EdgeInsets(
-                        140.0 * PIXEL_DENSITY,
+                        top,
                         40.0 * PIXEL_DENSITY,
-                        120.0 * PIXEL_DENSITY,
+                        bottomPadding(120.0, top, viewHeightPx),
                         40.0 * PIXEL_DENSITY
                 )
             }
@@ -900,9 +935,15 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
+        viewSizePx = w to h
+        applyCameraPadding()
+    }
+
+    private fun applyCameraPadding() {
+        val (w, h) = viewSizePx ?: return
         val landscape = w > h
-        viewportDataSource.followingPadding = followingPaddingFor(landscape, w)
-        viewportDataSource.overviewPadding = overviewPaddingFor(landscape, w)
+        viewportDataSource.followingPadding = followingPaddingFor(landscape, w, h)
+        viewportDataSource.overviewPadding = overviewPaddingFor(landscape, w, h)
         viewportDataSource.evaluate()
     }
 
@@ -1161,6 +1202,15 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         currentFollowingZoom = followingZoom
         viewportDataSource.followingZoomPropertyOverride(followingZoom)
         viewportDataSource.evaluate()
+    }
+
+    // Height (dp) of a JS overlay over the bottom of the map; the camera keeps the puck above it.
+    // Before the first layout there is no size to clamp against, so the value waits for onSizeChanged.
+    fun setCameraBottomInset(inset: Double?) {
+        val newInset = inset?.takeIf { it.isFinite() && it > 0 } ?: 0.0
+        if (newInset == cameraBottomInset) return
+        cameraBottomInset = newInset
+        applyCameraPadding()
     }
 
     fun recenterMap() {

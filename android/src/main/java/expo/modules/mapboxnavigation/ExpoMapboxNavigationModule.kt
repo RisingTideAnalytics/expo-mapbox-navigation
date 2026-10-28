@@ -216,6 +216,10 @@ class ExpoMapboxNavigationModule : Module() {
         view.setFollowingZoom(followingZoom)
       }
 
+      Prop("cameraBottomInset") { view: ExpoMapboxNavigationView, inset: Double? ->
+        view.setCameraBottomInset(inset)
+      }
+
       AsyncFunction("recenterMap") { view: ExpoMapboxNavigationView -> view.recenterMap() }
     }
   }
