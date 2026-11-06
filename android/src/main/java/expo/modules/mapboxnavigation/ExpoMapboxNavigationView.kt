@@ -171,6 +171,7 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
     private val onRouteFailedToLoad by EventDispatcher()
     private val onLocationChange by EventDispatcher()
     private val onMuteChange by EventDispatcher()
+    private val onVoiceFallback by EventDispatcher()
 
     private val mapboxNavigation = MapboxNavigationApp.current()
     private var mapboxStyle: Style? = null
@@ -326,6 +327,21 @@ class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
             MapboxNavigationConsumer<Expected<SpeechError, SpeechValue>> { expected ->
                 expected.fold(
                         { error ->
+                            // The Mapbox cloud voice could not be produced, so the announcement is
+                            // spoken by the on-device TTS voice instead. That switch is otherwise
+                            // silent, which is how one leg can sound different from the next with
+                            // nothing in any log (MOB-394), so report every fallback announcement.
+                            onVoiceFallback(
+                                    mapOf(
+                                            "platform" to "android",
+                                            "reason" to
+                                                    (error.throwable?.message?.let {
+                                                        "${error.errorMessage}: $it"
+                                                    }
+                                                            ?: error.errorMessage),
+                                            "announcement" to error.fallback.announcement
+                                    )
+                            )
                             voiceInstructionsPlayer.play(
                                     error.fallback,
                                     voiceInstructionsPlayerCallback

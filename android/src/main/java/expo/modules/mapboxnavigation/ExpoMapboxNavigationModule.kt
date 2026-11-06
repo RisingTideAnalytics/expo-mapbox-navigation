@@ -124,7 +124,8 @@ class ExpoMapboxNavigationModule : Module() {
               "onRoutesLoaded",
               "onRouteFailedToLoad",
               "onLocationChange",
-              "onMuteChange"
+              "onMuteChange",
+              "onVoiceFallback"
       )
 
       Prop("coordinates") { view: ExpoMapboxNavigationView, coordinates: List<Map<String, Any>> ->

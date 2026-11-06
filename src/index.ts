@@ -27,4 +27,5 @@ export type {
   OfflineProgressEvent,
   OfflineCompleteEvent,
   OfflineErrorEvent,
+  VoiceFallbackEvent,
 } from "./ExpoMapboxNavigation.types";

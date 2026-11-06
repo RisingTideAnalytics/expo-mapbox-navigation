@@ -78,7 +78,7 @@ public class ExpoMapboxNavigationModule: Module {
     }
 
     View(ExpoMapboxNavigationView.self) {
-      Events("onRouteProgressChanged", "onCancelNavigation", "onWaypointArrival", "onFinalDestinationArrival", "onRouteChanged", "onUserOffRoute", "onRoutesLoaded", "onRouteFailedToLoad", "onLocationChange", "onMuteChange")
+      Events("onRouteProgressChanged", "onCancelNavigation", "onWaypointArrival", "onFinalDestinationArrival", "onRouteChanged", "onUserOffRoute", "onRoutesLoaded", "onRouteFailedToLoad", "onLocationChange", "onMuteChange", "onVoiceFallback")
 
       Prop("coordinates") { (view: ExpoMapboxNavigationView, coordinates: Array<Dictionary<String, Any>>) in
          var points: Array<CLLocationCoordinate2D> = []

@@ -37,6 +37,7 @@ class ExpoMapboxNavigationView: ExpoView {
     private let onRouteFailedToLoad = EventDispatcher()
     private let onLocationChange = EventDispatcher()
     private let onMuteChange = EventDispatcher()
+    private let onVoiceFallback = EventDispatcher()
 
     let controller = ExpoMapboxNavigationViewController()
 
@@ -58,6 +59,7 @@ class ExpoMapboxNavigationView: ExpoView {
         controller.onRouteFailedToLoad = onRouteFailedToLoad
         controller.onLocationChange = onLocationChange
         controller.onMuteChange = onMuteChange
+        controller.onVoiceFallback = onVoiceFallback
     }
 
     override func layoutSubviews() {
@@ -94,6 +96,63 @@ class ExpoMapboxNavigationViewController: UIViewController {
     // The provider and its trip session are shared across instances, so a starting controller must
     // tear down the previous owner or two controllers drive one session. weak to not retain it.
     static weak var activeController: ExpoMapboxNavigationViewController? = nil
+
+    // The shared synthesizer is a MultiplexedSpeechSynthesizer: the Mapbox cloud voice first, the
+    // on-device AVSpeech voice as its fallback. The SDK switches between them silently, which is how
+    // one leg can sound different from the next with nothing in any log (MOB-394). Observe each
+    // child once per process (the synthesizer is process-wide, see sharedVoiceController) and report
+    // every announcement the fallback voice speaks to the active view, together with the Mapbox
+    // error that caused it when the SDK published one.
+    private static var voiceFallbackObservers: Set<AnyCancellable> = []
+    private static var lastMapboxSpeechError: String? = nil
+
+    @MainActor static func installVoiceFallbackObserverOnce() {
+        guard voiceFallbackObservers.isEmpty,
+              let multiplexed = sharedVoiceController.speechSynthesizer as? MultiplexedSpeechSynthesizer
+        else { return }
+        for child in multiplexed.speechSynthesizers {
+            let isMapboxVoice = child is MapboxSpeechSynthesizer
+            child.voiceInstructions
+                .receive(on: DispatchQueue.main)
+                .sink { event in
+                    if isMapboxVoice {
+                        if let failure = event as? VoiceInstructionEvents.EncounteredError {
+                            lastMapboxSpeechError = describeSpeechError(failure.error)
+                        } else if event is VoiceInstructionEvents.WillSpeak {
+                            lastMapboxSpeechError = nil
+                        }
+                        return
+                    }
+                    guard let willSpeak = event as? VoiceInstructionEvents.WillSpeak else { return }
+                    activeController?.onVoiceFallback?([
+                        "platform": "ios",
+                        "reason": lastMapboxSpeechError ?? "unknown",
+                        "announcement": willSpeak.instruction.text,
+                    ])
+                    lastMapboxSpeechError = nil
+                }
+                .store(in: &voiceFallbackObservers)
+        }
+    }
+
+    private static func describeSpeechError(_ error: SpeechError) -> String {
+        switch error {
+        case .apiError(_, _, let underlying):
+            return "apiError: \(underlying?.localizedDescription ?? "no underlying error")"
+        case .noData:
+            return "noData"
+        case .unableToControlAudio(_, let action, let underlying):
+            return "unableToControlAudio(\(action.rawValue)): \(underlying?.localizedDescription ?? "")"
+        case .unableToInitializePlayer(_, _, _, let underlying):
+            return "unableToInitializePlayer: \(underlying.localizedDescription)"
+        case .undefinedSpeechLocale:
+            return "undefinedSpeechLocale"
+        case .unsupportedLocale(let locale):
+            return "unsupportedLocale(\(locale.identifier))"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
 
     // Painted under the map so the style-load / handoff gap reads dark/light instead of white.
     static let nightBackdropColor = UIColor(red: 0.12, green: 0.12, blue: 0.13, alpha: 1.0)
@@ -144,6 +203,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
     var onRouteFailedToLoad: EventDispatcher? = nil
     var onLocationChange: EventDispatcher? = nil
     var onMuteChange: EventDispatcher? = nil
+    var onVoiceFallback: EventDispatcher? = nil
 
     var calculateRoutesTask: Task<Void, Error>? = nil
     // Coalesces the burst of per-prop update() calls React applies each render into one
@@ -1393,6 +1453,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
                 previous.teardownForHandoff()
             }
             ExpoMapboxNavigationViewController.activeController = self
+            ExpoMapboxNavigationViewController.installVoiceFallbackObserverOnce()
             mapboxNavigation!.tripSession().startActiveGuidance(with: navigationRoutes, startLegIndex: 0)
             // Request the following camera ourselves and latch it. On the simulator the camera did
             // enter .following here, but cameraStates never emitted it, so an .idle from the first

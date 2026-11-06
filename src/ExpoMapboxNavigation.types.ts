@@ -94,6 +94,12 @@ export type OfflineErrorEvent = {
   message: string;
 };
 
+export type VoiceFallbackEvent = {
+  platform: "ios" | "android";
+  reason: string;
+  announcement: string;
+};
+
 export type ExpoMapboxNavigationViewProps = {
   ref?: Ref<ExpoMapboxNavigationViewRef>;
   coordinates: Array<{ latitude: number; longitude: number }>;
@@ -183,6 +189,14 @@ export type ExpoMapboxNavigationViewProps = {
    * via `"observed"` about a second late and its icon may be stale).
    */
   onMuteChange?: (event: { nativeEvent: { isMuted: boolean; source?: string } }) => void;
+  /**
+   * Fired each time an announcement is spoken by the on-device text-to-speech voice because the
+   * Mapbox cloud voice could not be produced for it. The SDK otherwise switches voices silently.
+   *
+   * `reason` is the SDK's error for the failed cloud-voice request (`"unknown"` on iOS when the
+   * fallback spoke without the SDK publishing one); `announcement` is the plain text spoken.
+   */
+  onVoiceFallback?: (event: { nativeEvent: VoiceFallbackEvent }) => void;
   style?: StyleProp<ViewStyle>;
   uiStyle?: "day" | "night";
 };
