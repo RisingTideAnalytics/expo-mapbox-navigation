@@ -319,7 +319,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
 
         // Clear ownership synchronously so an incoming controller sees no owner; the UIKit/session
         // teardown must hop to the main actor (deinit is nonisolated), so it's async best-effort —
-        // the real single-session guarantee is teardownForHandoff() before startActiveGuidance.
+        // the real single-session guarantee is teardownForHandoff() before the new controller's guidance starts.
         let session = tripSession
         let navVC = navigationViewController
         // UIControl holds targets unowned, so this must be dropped on the main actor before the
@@ -410,7 +410,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
     }
 
     // Lets an incoming controller start without a second session/VC coexisting. Doesn't idle the
-    // shared session — the incoming startActiveGuidance resets it.
+    // shared session — the incoming controller's guidance start resets it.
     func teardownForHandoff() {
         isActive = false
         // Invalidate in-flight route work so a stale result can't retake the shared session when this
@@ -1011,7 +1011,7 @@ class ExpoMapboxNavigationViewController: UIViewController {
             case .overview:
                 button.isHidden = false
             case .idle:
-                // cameraStates replays on subscribe and we install before startActiveGuidance, so
+                // cameraStates replays on subscribe and we install before guidance starts, so
                 // the first value is a construction-time .idle. Only once we have actually followed
                 // does .idle mean the driver panned away. (.dropFirst() would break if the
                 // publisher ever stopped replaying.)
@@ -1386,14 +1386,19 @@ class ExpoMapboxNavigationViewController: UIViewController {
         ])
         navigationViewController.didMove(toParent: self)
 
-        // Only start active guidance if this instance is still active
+        // Only take over the shared session if this instance is still active
         if isActive {
-            // Tear down the previous owner before starting, or two sessions coexist on the shared provider.
+            // Tear down the previous owner first, or two controllers coexist on the shared provider.
             if let previous = ExpoMapboxNavigationViewController.activeController, previous !== self {
                 previous.teardownForHandoff()
             }
             ExpoMapboxNavigationViewController.activeController = self
-            mapboxNavigation!.tripSession().startActiveGuidance(with: navigationRoutes, startLegIndex: 0)
+            // Do NOT call tripSession().startActiveGuidance here. NavigationViewController starts active
+            // guidance itself from the navigationRoutes it was created with (Session.state reaches
+            // .activeGuidance within ~0.5 s). Calling it again here made the SDK log "[BUG] Two
+            // simultaneous active navigation sessions" on every leg, including the first (MOB-424).
+            // Session.state lags the real start (it still reads .idle right after it), so a "start
+            // only if idle" guard cannot work either.
             // Request the following camera ourselves and latch it. On the simulator the camera did
             // enter .following here, but cameraStates never emitted it, so an .idle from the first
             // pan looked like startup and kept the button hidden (MOB-398). Requesting it makes the
