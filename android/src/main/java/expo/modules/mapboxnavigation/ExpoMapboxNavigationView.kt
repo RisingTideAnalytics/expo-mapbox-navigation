@@ -119,6 +119,14 @@ private val BACKDROP_LIGHT = Color.rgb(230, 230, 232)
 class ExpoMapboxNavigationView(context: Context, appContext: AppContext) :
         ExpoView(context, appContext) {
 
+    // React Native drops requestLayout() from a native view's children
+    // (https://github.com/facebook/react-native/issues/17968), so a child that changes size or
+    // visibility after the first layout keeps its old frame. The recenter button starts GONE; when a
+    // leg's camera reached FOLLOWING before the view was laid out with the button showing, the button
+    // stayed 0x0 and never drew after a pan (MOB-425). This makes ExpoView re-measure and re-lay out
+    // after each request.
+    override val shouldUseAndroidLayout = true
+
     // Set view tree lifecycle owner to the activity
     // Otherwise leads to crashes when mapbox package tries to query the view tree lifecycle
     // owner
